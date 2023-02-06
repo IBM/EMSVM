@@ -1,0 +1,13 @@
+{
+    "json_version": "1.0",
+    "Red Hat Enterprise Linux 8.0": "NOK",
+    "Red Hat Enterprise Linux 8.1": "NOK",
+    "Red Hat Enterprise Linux 8.2": "NOK",
+    "Red Hat Enterprise Linux 8.3": "NOK",
+    "Red Hat Enterprise Linux 8.4": "NOK",
+    "Red Hat Enterprise Linux 8.5": "NOK",
+    "Red Hat Enterprise Linux 8.6": "OK",
+    "Red Hat Enterprise Linux 8.7": "OK",
+    "Red Hat Enterprise Linux 8.8": "NOK",
+    "Red Hat Enterprise Linux 8.9": "NOK"
+}

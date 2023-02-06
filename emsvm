@@ -1,0 +1,3827 @@
+#!/usr/bin/python3
+import os
+import sys
+import datetime
+import platform
+import argparse
+import subprocess
+import logging
+import re
+import shutil
+import json
+import hashlib
+import shlex
+import multiprocessing
+import grp
+import time
+import random
+import mimetypes
+
+
+PROGRAM_NAME = "emsvm"
+# Remember to update the VERSION file too
+VERSION = "1.0"
+
+# Colorful constants
+RED = '\033[91m'
+GREEN = '\033[92m'
+YELLOW = '\033[93m'
+NOCOLOR = '\033[0m'
+
+# GIT
+GIT_URL = "https://github.com/IBM/EMSVM"
+
+class EMSVM(object):
+
+    """
+        Class to manage emsvm qualification and running VM
+
+        RC 0  = Success
+        RC 1  = Generic error
+        RC 2  = Cannot load JSON file
+        RC 3  = Cannot calculate MD5 sum of file
+        RC 4  = Calculated MD5 sum and expected MD5 sum do not match
+        RC 5  = Processor type or architecture not supported
+        RC 6  = Mismatch on JSON file list and loading logic
+        RC 7  = Host is not a Redhat based system
+        RC 8  = Host is not a Linux system
+        RC 9  = JSON file does not exist
+        RC 10 = Cannot run 'rpm'
+        RC 11 = Error calculating VM FS size information
+        RC 12 = Fatal error on exec_command
+        RC 13 = VM disk file does not exist
+        RC 14 = Wrong VM memory sizing
+        RC 15 = Wrong VM CPU sizing
+        RC 16 = Cannot run systemctl tuned
+        RC 17 = Tuned is not active in the host
+        RC 18 = Cannot restart tuned via systemctl
+        RC 19 = Cannot run tuned-adm
+        RC 20 = Cannot load external python libs
+        RC 21 = Cannot connect to 'qemu:///system'
+        RC 22 = QEMU agent does not match local node
+        RC 23 = Cannot create KVM storage pool
+        RC 24 = Cannot obtain GID for group libvirt
+        RC 25 = Cannot activate KVM storage pool
+        RC 26 = Cannot set to autostart the KVM storage pool
+        RC 27 = Other KVM VM domains detected
+        RC 28 = KVM VM domain does not exist
+        RC 29 = Cannot create KVM VM domain
+        RC 30 = Cannot set KVM VM domain to autostart
+        RC 31 = Cannot start KVM VM domain
+        RC 32 = Packages test not passed
+        RC 33 = User stopped start VM
+        RC 34 = FIPS enabled on host
+        RC 35 = Did not get four LSN PCI XML friendly addresses
+        RC 36 = Could not detach NICs
+        RC 37 = There are less than 2 HSN ports or more than 6 HSN ports
+        RC 38 = Local version is not latest version
+        RC 39 = PCI to be passthrough has IP address
+        RC 40 = Could not connect to virsh console
+        RC 41 = mmlscluster exists in the host
+        RC 42 = No user validation of valid RedHat subscription in host
+        RC 43 = Log dir does not have enough free space
+        RC 44 = Error calculating log dir free space
+        RC 45 = Cannot check libvirtd status
+        RC 46 = libvirtd is not active
+        RC 47 = Cannot parse IOMMU groups and PCI addresses
+        RC 48 = HSN or LSN IOMMU groups are not compliant with requirements
+        RC 100 = Tests completed and host does not qualify to run EMSVM
+   """
+
+    def __init__ (self, subcommand, verbose, log_dir="/var/log/emsvm"):
+        # Start the clock
+        self.start_time_date_full = datetime.datetime.now()
+        self.start_time_date = self.start_time_date_full.strftime('%Y_%m_%d_%H_%M_%S')
+        self.subcommand = subcommand
+        self.log_dir = log_dir
+        self.verbose = verbose
+        self.fatal_error = False
+        self.long_hostname = platform.node()
+        self.hostname = self.long_hostname.split('.', 1)[0]
+
+        self.jsonFilesList = {
+            "supported_OS.json",
+            "NIC_adapters.json",
+            "HW_requirements.json",
+            "packages.json"
+        }
+        self.commands_to_check = [
+            'rpm',
+            'lspci',
+            "sudo",
+            'virsh',
+            'sysctl',
+            'tuned-adm',
+            'dmidecode',
+            "uuidgen",
+            "sestatus",
+            "cat",
+            "xz",
+            "lsscsi",
+            "stat"
+        ]
+        # Basic initial checks
+        self.__check_os(False)
+        # self.__check_commands(False)
+        self.__check_root_user(False)
+        # self.__check_FIPS(False)
+
+
+        # devnull redirect destination
+        self.DEVNULL = open(os.devnull, 'w')
+
+        # Logging
+        self.log_file = self.logFile = self.__create_log_file()
+        self.log_this = self.__start_logger()
+
+        self.log_this.info(
+            "Welcome to " +
+            PROGRAM_NAME +
+            " version " +
+            VERSION
+        )
+        self.log_this.info(
+            "Please visit " +
+            GIT_URL +
+            " for known issues and ensure you are running latest version"
+        )
+        self.log_this.info(
+            "Log file with details for this run is saved on: " +
+            self.log_file
+        )
+
+        # Same Basic tests as before but logging them
+        self.__check_os()
+        self.__check_commands()
+        self.__check_root_user()
+        self.__check_FIPS()
+        
+        # Further tests
+        self.__check_processor()
+        self.__get_host_info()
+        self.__check_KVM_capable()
+        self.__check_iommu_kernel_boot()
+        self.__dump_rpms()
+        self.__dump_nodedev_list()
+
+        # Define expected MD5 hashes of files
+        self.HW_REQUIREMENTS_MD5 = "63e9a37b3c70e0c88a5598269906d3a3"
+        self.NIC_ADAPTERS_MD5 = "8dea8f6348a5bcbe5ae40f4be0c90667"
+        self.PACKAGES_MD5 = "d03ace730ddc8a13c07ccf000d1b3784"
+        self.SUPPORTED_OS_MD5 = "efb12e1c2991fa115f6f0af735aca1c3"
+        self.VM_DISK_MD5 = [
+            "9ab77eea81a0590865d0e82019f7838f"
+        ]
+
+        # Load files
+        self.__load_json_files()
+
+        # Load vars from JSON dicts
+        self.fs_vm = self.HW_dictionary['FS_PATH']
+        self.min_gb_fs_size = self.HW_dictionary['MIN_GB_FREE_FS']
+        self.min_cores = self.HW_dictionary['MIN_CORES']
+        self.min_cores_small = self.HW_dictionary['MIN_CORES_SMALL']
+        self.min_gb_ram = self.HW_dictionary['MIN_GB_RAM']
+        self.min_gb_ram_small = self.HW_dictionary['MIN_GB_RAM_SMALL']
+        self.tuned_profile = self.HW_dictionary['TUNED_PROFILE']
+        self.VMFileFullURL = (
+            self.HW_dictionary['FS_PATH'] +
+            "/" +
+            self.HW_dictionary['VM_DISK_FILE']
+        )
+
+        # Set cross vars
+        self.KVM_stgpool_name = "EMSVM"
+        self.KVM_VM_name = "EMSVM"
+        self.KVM_machine = "pc-q35-rhel8.2.0"
+        self.KVM_exec = "/usr/libexec/qemu-kvm"
+        self.small_setup = False
+
+        # Deeper OS version checks
+        self.__check_os_dict()
+
+        # Get information about storage devices
+        self.__check_emsvm_dir_device()
+
+        # RPM checks
+        self.__packages_check()
+        self.__mmlscluster_bin_exists()
+
+        # New version check
+        self.__check_new_version()
+
+
+    def __start_logger(self):
+        log_format = '%(asctime)s %(levelname)-4s:\t %(message)s'
+        logging.basicConfig(level=logging.DEBUG,
+                            format=log_format,
+                            filename=self.logFile,
+                            filemode='w')
+
+        console = logging.StreamHandler()
+        if self.verbose:
+            console.setLevel(logging.DEBUG)
+        else:
+            console.setLevel(logging.INFO)
+        console.setFormatter(logging.Formatter(log_format))
+        logging.getLogger('').addHandler(console)
+        log_anchor = logging.getLogger(self.logFile)
+        return log_anchor
+
+
+    def __check_logdir_free(self):
+        try:
+            logDirStat = os.statvfs(self.log_dir)
+            fs_free = round(\
+                (logDirStat.f_frsize * logDirStat.f_bfree) / \
+                        (1024 ** 3), 2)
+            if fs_free <= 2.0:
+                print(
+                    "ERROR: There are 2GB of less free at " +
+                    self.log_dir
+                )
+                sys.exit(43)
+
+        except BaseException:
+            print(
+                "ERROR: Got an unexpected issue when getting the file system information of " +
+                self.log_dir
+            )
+            sys.exit(44)
+
+
+    def __create_log_file(self):
+        fullLogFile = (
+            self.log_dir +
+            "/emsvm_" +
+            self.subcommand +
+            "_" +
+            self.start_time_date +
+            ".log"
+        )
+
+        exists = os.path.exists(self.log_dir)
+        if exists:
+            isDir = os.path.isdir(self.log_dir)
+            if isDir:
+                # Directory already exists
+                self.__check_logdir_free()
+                return fullLogFile
+            else:
+                # It exists and it is a file ... we stop here
+                sys.exit(
+                    RED +
+                    "QUIT: " +
+                    NOCOLOR +
+                    "Log directory " +
+                    self.log_dir +
+                    " is a file, not a directory\n")
+        else:
+            # Log dir does not exist, lets create it
+            try:
+                os.makedirs(self.log_dir)
+                self.__check_logdir_free()
+                return fullLogFile
+            except BaseException:
+                sys.exit(
+                    RED +
+                    "QUIT: " +
+                    NOCOLOR +
+                    "Cannot create directory " +
+                    self.log_dir +
+                    " \n"
+                )
+
+
+    def __check_commands(self, logON=True):
+
+        if logON:
+            self.log_this.debug(
+                "Going to check if required commands " +
+                str(self.commands_to_check) +
+                " are avaialble"
+            )
+
+        for command in self.commands_to_check:
+            if shutil.which(command) is None:
+                if logON:
+                    self.log_this.error(
+                        RED + "QUIT: " + NOCOLOR + "cannot find command " + command + ". Please install it."
+                    )
+                    sys.exit(1)
+                sys.exit(RED + "QUIT: " + NOCOLOR + "cannot find command " + command + ". Please install it.\n")
+            elif logON:
+                self.log_this.debug(
+                    "Command '" +
+                    str(command) +
+                    "' found in path"
+                )
+
+
+    def __check_os(self, logON=True):
+        thisSystem = platform.system()
+        if thisSystem == "Linux":
+            if logON:
+                self.log_this.debug(
+                    "This is a Linux system"
+                )
+                thisDistribution = platform.dist()[0]
+                thisUname = platform.uname()
+                self.log_this.debug(str(thisUname))
+                if thisDistribution == "redhat" or "centos":
+                    self.log_this.debug(
+                        "This is a RedHat based system"
+                    )
+                else:
+                    self.log_this.error(
+                        "This is not a RedHat Linux system"
+                    )
+                    self.log_this.debug(
+                        "Going to exit with RC=7"
+                    )
+                    sys.exit(7)
+        else:
+            if logON:
+                self.log_this.error(
+                    "This is tool needs to be run in a Linux system"
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=8"
+                )
+            else:
+                print(
+                    RED +
+                    "QUIT: " +
+                    NOCOLOR +
+                    "this tool needs to be run in a Linux system"
+                )
+            sys.exit(8)
+
+
+    def __check_new_version(self):
+        # versionURL = GIT_URL + "/VERSION"
+        versionURL = "https://raw.githubusercontent.com/IBM/EMSVM/main/VERSION"
+        import requests
+        self.log_this.debug(
+            "Going to check if this version " +
+            str(VERSION) +
+            " is the latest available from " +
+            versionURL
+        )
+        try:
+            canGetRepoVersion = True
+            versionRequest = requests.get(versionURL,timeout=4)
+            self.log_this.debug(
+                "Could get current version request from repository"
+            )
+            self.log_this.debug(
+                "Going to try to get the content of the repository VERSION file"
+            )
+            versionContent = versionRequest.json()
+            self.log_this.debug(
+                "Content of the version file is " +
+                str(versionContent)
+            )
+        except BaseException:
+            self.log_this.warning(
+                "Could not get current version from repository, please be sure that you are running latest version from " +
+                GIT_URL
+            )
+            canGetRepoVersion = False
+
+        if canGetRepoVersion:
+            self.log_this.debug(
+                "We got the version information from repository, lets see if we have latest version"
+            )
+
+            if versionContent <= float(VERSION):
+                self.log_this.info(
+                    "This version is the latest available in the repository " +
+                    str(GIT_URL)
+                )
+            else:
+                self.log_this.error(
+                    "This version " +
+                    str(VERSION) +
+                    " is not the latest avaiable on the repo " +
+                    str(GIT_URL) +
+                    ". Please visit the repo and get the latest version " +
+                    str(versionContent)
+                )
+                self.log_this.debug(
+                    "Going to exit RC=38"
+                )
+                sys.exit(38)
+        else:
+            self.log_this.info(
+                "Please manually check that you are running the latest version. " +
+                "Any issue needs to be reproduced with the latest version"
+            )
+            self.log_this.debug(
+                "Could not get version from repository, will wait five seconds so user reads the previous message"
+            )
+            time.sleep(5)
+            self.log_this.debug(
+                "Five seconds passed"
+            )
+
+    def __packages_check(self):
+        errors = 0
+        self.log_this.info(
+            "Checking RPM packages status"
+        )
+        for package in self.packages_dictionary.keys():
+            if package != "json_version":
+                current_package_rc = self.__rpm_is_installed(package)
+                expected_package_rc = self.packages_dictionary[package]
+                if current_package_rc == expected_package_rc:
+                    self.log_this.debug(
+                        "Installation status of " +
+                        package +
+                        " is as expected")
+                else:
+                    self.log_this.error(
+                        "Installation status of " +
+                        package +
+                        " is not as expected")
+                    errors = errors + 1
+                    self.fatal_error = True
+        if errors == 0:
+            self.log_this.info(
+                "All required RPM packages have the expected installation status"
+            )
+        else:
+            self.log_this.error(
+                "Not all required RPM packages have the expected installation status"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=32"
+            )
+            sys.exit(32)
+
+
+    def __check_os_dict(self):
+        fatal_error = False
+        self.log_this.debug(
+            "Going to check if this RedHat based Linux is supported"
+        )
+        # Check redhat-release vs dictionary list
+        redhat_distribution = platform.linux_distribution()
+        version_string = redhat_distribution[1]
+        redhat_distribution_str = redhat_distribution[0] + \
+            " " + version_string
+        self.log_this.debug(
+            "Got platform linux distribution '" +
+            redhat_distribution_str +
+            "'"
+        )
+        try:
+            if self.os_dictionary[redhat_distribution_str] == 'OK':
+                self.log_this.info(
+                    redhat_distribution_str +
+                    " is a supported OS")
+            elif self.os_dictionary[redhat_distribution_str] == 'WARN':
+                self.log_this.warning(
+                    " " +
+                    redhat_distribution_str +
+                    " is not an officially supported OS"
+                )
+            elif self.os_dictionary[redhat_distribution_str] == 'NOK':
+                self.log_this.error(
+                    " " +
+                    redhat_distribution_str +
+                    " is explicitly not supported OS " +
+                    ". This means we have tested and " +
+                    "found fatal issues with it"
+                )
+                self.fatal_error = True
+            else:
+                self.log_this.error(
+                    "This Linux distribution is not supported nor tested"
+                )
+                self.fatal_error = True
+        except BaseException:
+            self.log_this.error(
+                    "This Linux distribution is not supported nor tested"
+                )
+            self.fatal_error = True
+
+
+    def __tuned_adm_check(self):
+        # Is tuned up?
+        try:  # Can we run tune-adm?
+            return_code = subprocess.call(['systemctl','is-active','tuned'],stdout=self.DEVNULL, stderr=self.DEVNULL)
+            self.log_this.debug(
+                "We could run 'systemctl is-active tuned'"
+            )
+        except BaseException:
+            self.log_this.error(
+                "Could not run 'systemctl is-active tuned'"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=16"
+            )
+            sys.exit(16)
+        if return_code != 0:
+            self.log_this.error(
+                "Tuned is not running, start it now and at boot with " +
+                "'systemctl enable tuned --now' and run this tool again"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=17"
+            )
+            sys.exit(17)
+        # Lets have a clean start by restarting the daemon
+        try:
+            rc_restart = subprocess.call(['systemctl','restart','tuned'],stdout=self.DEVNULL, stderr=self.DEVNULL)
+        except BaseException:
+            self.log_this.error(
+                "Cannot restart tuned"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=18"
+            )
+            sys.exit(18)
+        if rc_restart != 0:
+            self.log_this.error(
+                "Cannot restart tuned"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=18"
+            )
+            sys.exit(18)
+        try:  # Can we run tune-adm?
+            return_code = subprocess.call(['tuned-adm','active'],stdout=self.DEVNULL, stderr=self.DEVNULL)
+            self.log_this.debug(
+                "We can run 'tuned-adm active'"
+            )
+        except BaseException:
+            self.log_this.error(
+                "Cannot run 'tuned-adm active'"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=19"
+            )
+            sys.exit(19)
+
+        tuned_adm = self.__exec_cmd("tuned-adm active", decode=True)
+        self.log_this.debug(
+            "Got tuned-adm active as: " +
+            tuned_adm
+        )
+        if self.tuned_profile in tuned_adm:
+            self.log_this.info(
+                "Current tune profile is '" +
+                self.tuned_profile +
+                "'"
+            )
+            self.log_this.debug(
+                "Going to check if is matching the profile"
+            )
+            return_code = subprocess.call(['tuned-adm','verify'],stdout=self.DEVNULL, stderr=self.DEVNULL)
+            if return_code == 0:
+                self.log_this.info(
+                    "OS settings match the running profile"
+                )
+            else:
+                self.log_this.error(
+                    "OS settings do not match the running profile. " +
+                    "Check the deviations with 'tuned-adm verify'"
+                )
+                self.fatal_error = True
+        else:
+            self.log_this.error(
+                "Current tune profile is not '" +
+                self.tuned_profile +
+                "'"
+            )
+            self.fatal_error = True
+
+
+    def __check_iommu_kernel_boot(self):
+        self.log_this.debug(
+            "Going to check for IOMMU passthrough parameters for AMD based systems"
+        )
+
+        cmdline_out = self.__exec_cmd("cat /proc/cmdline", decode=True)
+        iommu_pt_regex = r'iommu=pt'
+        iommu_pt_regex_compiled = re.compile(iommu_pt_regex, re.MULTILINE)
+        iommu_pt_found = iommu_pt_regex_compiled.search(cmdline_out)
+        if iommu_pt_found:
+            self.log_this.debug(
+                "Found iommu=pt on the boot kernel parameters"
+            )
+        else:
+            self.log_this.error(
+                "Did not find iommu=pt on the boot kernel parameters"
+            )
+            self.fatal_error = True
+        
+        iommu_amd_regex = r'amd_iommu=(on|1)'
+        iommu_amd_regex_compiled = re.compile(iommu_amd_regex, re.MULTILINE)
+        iommu_amd_found = iommu_amd_regex_compiled.search(cmdline_out)
+        if iommu_amd_found:
+            self.log_this.debug(
+                "Found amd_iommu=on|1  on the boot kernel parameters"
+            )
+        else:
+            self.log_this.error(
+                "Did not find amd_iommu=on|1 on the boot kernel parameters"
+            )
+            self.fatal_error = True
+
+
+
+    def __check_selinux(self):
+        # Check sestatus is disabled
+        self.log_this.debug(
+            "Going to check if SELINUX status is disabled"
+        )
+        sestatus_out = self.__exec_cmd("sestatus", decode=True)
+        self.log_this.debug(
+            "Got back from sestatus, with output: " +
+            sestatus_out
+        )
+
+        regex_to_check = r'^SELinux status:.+disabled'
+        SELinux_disabled_re = re.compile(regex_to_check, re.MULTILINE)
+        SElinux_disabled = SELinux_disabled_re.search(sestatus_out)
+
+        if SElinux_disabled:
+            self.log_this.debug(
+                "This system SELINUX status is disabled"
+            )
+            return False
+        else:
+            self.log_this.error(
+                "SELINUX is not disabled"
+            )
+            self.fatal_error = True
+
+
+    def __check_quad_port_Ethernet(self):
+        self.LSN_PCI_address = []
+        Ethernet_NIC_PCI_address = []
+        self.log_this.info(
+            "Looking that we have at least one quad port Ethernet NIC for Low Speed Network (LSN)"
+        )
+        regex_to_check = r'^.*Ethernet.*$'
+        NIC_exists_re = re.compile(regex_to_check, re.MULTILINE)
+        for pciaddr in self.lspci_dict:
+            if pciaddr in self.HSN_PCI_address:
+                self.log_this.debug(
+                    "PCI address '" +
+                    str(pciaddr) +
+                    "' is a HSN NIC, we ignore it"
+                )
+                continue
+            self.log_this.debug(
+                "Going to check if PCI entry '" +
+                self.lspci_dict[pciaddr] +
+                "' is an Ethernet NIC"
+            )
+            Ethenet_NIC_exists = NIC_exists_re.search(self.lspci_dict[pciaddr])
+            if Ethenet_NIC_exists:
+                self.log_this.debug(
+                    "We believe PCI entry '"+
+                    self.lspci_dict[pciaddr] +
+                    "' is an Ethernet NIC "
+                )
+                Ethernet_NIC_PCI_address.append(pciaddr)
+
+        self.log_this.debug(
+            "Got LSN PCI address candidates as: " +
+            str(Ethernet_NIC_PCI_address)
+        )
+        regex_port_3 = r"(?P<rootpciaddr>[a-fA-F0-9]{4}:[a-fA-F0-9]{2}:[a-fA-F0-9]{2}[\.])(?P<pciaddrport>[3])"
+        PCIETHERNETP3 = re.compile(regex_port_3)
+        for NIC_PCI_addr in Ethernet_NIC_PCI_address:
+            self.log_this.debug(
+                "Going to check in NIC PCI address '" +
+                str(NIC_PCI_addr) +
+                "' is a P3"
+            )
+            is_P3 = PCIETHERNETP3.match(NIC_PCI_addr)
+            if is_P3:
+                self.log_this.debug(
+                    "We believe NIC PCI address '" +
+                    str(NIC_PCI_addr) +
+                    "' is a P3"
+                )
+                rootpciaddr = is_P3.group('rootpciaddr')
+                self.log_this.debug(
+                    "Going to check if root PCI address '" +
+                    str(rootpciaddr) +
+                    "' has four ports"
+                )
+                ports_found = 1
+                port_range = range(0,3,1)
+                P3_description = self.lspci_dict[NIC_PCI_addr]
+                for port in port_range:
+                    root_and_port_addr = rootpciaddr + str(port)
+                    self.log_this.debug(
+                        "Going to check PCI address '"+
+                        root_and_port_addr +
+                        "'"
+                    )
+                    if root_and_port_addr in self.lspci_dict:
+                        self.log_this.debug(
+                            "Found port " +
+                            str(port) +
+                            " for root PCI address '" +
+                            str(rootpciaddr) +
+                            "'"
+                        )
+                        self.log_this.debug(
+                            "Going to check if PCI description '" +
+                            str(self.lspci_dict[root_and_port_addr]) +
+                            "' from port '" +
+                            str(root_and_port_addr) +
+                            "' is the same as P3 description '" +
+                            str(P3_description) +
+                            "'"
+                        )
+                        if self.lspci_dict[root_and_port_addr] == P3_description:
+                            self.log_this.debug(
+                                "Both descriptions are the same"
+                            )
+                            ports_found = ports_found + 1
+                        else:
+                            self.log_this.debug(
+                                "Descriptions are not the same"
+                            )
+                    else:
+                        self.log_this.debug(
+                            "Did not find port " +
+                            str(port) +
+                            " for root PCI address '" +
+                            str(rootpciaddr) +
+                            "'. This NIC cannot be LSN"
+                        )
+                if ports_found == 4:
+                    self.log_this.info(
+                        "The NIC '" +
+                        self.lspci_dict[NIC_PCI_addr] +
+                        "' is OK as LSN NIC. Going to append PCI address '" +
+                        str(rootpciaddr) +
+                        "' for ports 0, 1, 2 and 3"
+                    )
+                    quad_port_range = range(0,4,1)
+                    for port in quad_port_range:
+                        address_to_append = rootpciaddr + str(port)
+                        self.LSN_PCI_address.append(address_to_append)
+                        self.log_this.debug(
+                            "Appended as LSN NIC PCI address '" +
+                            str(address_to_append) +
+                            "'"
+                            )
+                    self.log_this.debug(
+                        "Found one LSN quad port NIC, we stop looking for more"
+                    )
+                    return True
+        # We are this far ... no dice
+        self.log_this.error(
+            "No LSN quad port NIC found"
+        )
+        self.fatal_error = True
+
+
+    def __check_PCI_speed_width(self, PCI_address):
+        self.log_this.debug(
+            "Going to check the PCI link speed and width of PCI address: " +
+            str(PCI_address)
+        )
+        cmd2run = "lspci -vv -s " + PCI_address
+        output = self.__exec_cmd(cmd2run, decode=True)
+        regex_to_check = r'.*LnkSta:.*Speed\s(?P<linkSpeed>[0-9]{1,2})GT.*\sx(?P<linkWidth>[0-9]{1,2}).*'
+        lnkmatch = re.finditer(regex_to_check, output, re.MULTILINE)
+        self.log_this.debug(
+            "Regex match for link status done for " +
+            str(PCI_address)
+        )
+        for pcimatch in lnkmatch:
+            try:
+                lnkSpeed = pcimatch.group('linkSpeed')
+                self.log_this.debug(
+                    "Got Link Speed as " +
+                    str(lnkSpeed) +
+                    " GT/s"
+                )
+                lnkSpeed = int(lnkSpeed)
+                self.log_this.debug(
+                    "lnkSpeed is now an integer"
+                )
+                lnkWidth = pcimatch.group('linkWidth')
+                self.log_this.debug(
+                    "Got " +
+                    str(lnkWidth) +
+                    " lines negotiated"
+                )
+                lnkWidth = int(lnkWidth)
+                self.log_this.debug(
+                    "lnkWidth is now an integer"
+                )
+            except BaseException:
+                self.log_this.debug(
+                    "Got an issue matching regex for PCI link information on " +
+                    str(PCI_address)
+                )
+                self.log_this.debug(
+                    "Not going to accept this card"
+                )
+                return False
+            self.log_this.info(
+                "The PCI address " +
+                str(PCI_address) +
+                " has a negotiated link speed of " +
+                str(lnkSpeed) +
+                " GT/s and " +
+                str(lnkWidth) +
+                " lines"
+            )
+            if lnkSpeed < 8:
+                self.log_this.debug(
+                    "This PCI address " +
+                    str(PCI_address) +
+                    " has link speed negotiated to less than 8 GT/s"
+                )
+                self.log_this.debug(
+                    "Not going to pass this card"
+                )
+                return False
+            elif 8 <= lnkSpeed < 16:
+                self.log_this.debug(
+                    "This PCI address " +
+                    str(PCI_address) +
+                    " has negotiated at 8 GT/s and less than 16 GT/s, likely 8 GT/s"
+                )
+                smallCandidate = True
+            else:
+                self.log_this.debug(
+                    "This PCI address " +
+                    str(PCI_address) +
+                    " has negotiated at least at 16 GT/s"
+                )
+                smallCandidate = False
+
+            if lnkWidth < 16:
+                self.log_this.debug(
+                    "This PCI address " +
+                    str(PCI_address) +
+                    " has link width negotiated to less than 16 lines"
+                )
+                self.log_this.debug(
+                    "Not going to pass this card"
+                )
+                return False
+            else:
+                self.log_this.debug(
+                    "This PCI address " +
+                    str(PCI_address) +
+                    " has negotiated at least at 16 lines"
+                )
+
+            if smallCandidate:
+                self.log_this.info(
+                    "Card passes but has small setup capabilities, we tag the setup to small"
+                )
+                self.small_setup = True
+            return True
+
+
+    def __check_HSN(self):
+        self.HSN_PCI_address = []
+        # do a lspci check if it has at least one adpater from the dictionary
+        self.log_this.info(
+            "Looking that we have at least one NIC for High Speed Network (HSN)"
+        )
+        for NIC in self.NIC_dictionary:
+            if NIC != "json_version":
+                self.log_this.debug(
+                    "Going to look for " +
+                    NIC +
+                    " in this host"
+                )
+                regex_to_check = r'^.+' + NIC + r'.*'
+                HSN_NIC_exists_re = re.compile(regex_to_check, re.MULTILINE)
+                for PCI_entry in self.lspci_dict.keys():
+                    self.log_this.debug(
+                        "Going to check if PCI entry '" +
+                        self.lspci_dict[PCI_entry] +
+                        "' is HSN NIC '" +
+                        NIC +
+                        "'"
+                    )
+                    HSN_NIC_exists = HSN_NIC_exists_re.search(self.lspci_dict[PCI_entry])
+                    if HSN_NIC_exists:
+                        self.log_this.debug(
+                            "We believe PCI entry '"+
+                            self.lspci_dict[PCI_entry] +
+                            "' is HSN NIC '" +
+                            NIC +
+                            "'"
+                        )
+                        self.log_this.debug(
+                            "Going to check if we accept this HSN NIC based on JSON"
+                        )
+                        if self.NIC_dictionary[NIC] == "OK":
+                            goodPCILink = self.__check_PCI_speed_width(PCI_entry)
+                            if goodPCILink:
+                                self.log_this.info(
+                                    "The NIC '" +
+                                    self.lspci_dict[PCI_entry] +
+                                    "' is OK as HSN NIC. Going to append PCI address '"+
+                                    PCI_entry +
+                                    "' as HSN NIC"
+                                )
+                                self.HSN_PCI_address.append(PCI_entry)
+                            else:
+                                self.log_this.warning(
+                                    "Although NIC " +
+                                    self.lspci_dict[PCI_entry] +
+                                    " on address " +
+                                    str(PCI_entry) +
+                                    " would be a good card for HSN its negotiated PCI link speed and/or " +
+                                    "width does not meet the requirements for small or bigger setups"
+                                )
+                        elif self.NIC_dictionary[NIC] == "NOK":
+                            self.log_this.warning(
+                                "We found one " +
+                                NIC +
+                                " on PCI address '" +
+                                PCI_entry +
+                                "'. We are not going to use this NIC as it " +
+                                "is explicitly not supported"
+                            )
+        # Do we have any OK card?
+        if (len(self.HSN_PCI_address) > 1):
+            self.log_this.info(
+                "Found at least two HSN ports"
+            )
+            self.log_this.debug(
+                "The HSN PCI address list is: '" +
+                str(self.HSN_PCI_address) +
+                "'"
+            )
+        elif (len(self.HSN_PCI_address) > 6):
+            self.log_this.error(
+                "There are more than six HSN PCI ports"
+            )
+            self.fatal_error = True
+        elif (len(self.HSN_PCI_address) == 1):
+            self.log_this.error(
+                "Only one HSN PCI port was detected"
+            )
+            self.fatal_error = True
+        else:
+            self.log_this.error(
+                "Did not find any supported NIC for HSN"
+            )
+            self.fatal_error = True
+
+
+    def __convert_lspci_to_dict(self):
+        # We have at least one HSN card detected
+        self.log_this.debug(
+            "Going to convert lspci output to dictionary with PCI addresses as key"
+        )
+        regex_to_match = r"(?P<pciaddr>[a-fA-F0-9]{4}:[a-fA-F0-9]{2}:[a-fA-F0-9]{2}[\.][0-9])[\ ](?P<pcival>.*)"
+        PCIPATT = re.compile(regex_to_match)
+        self.lspci_dict = dict()
+        # Extra \n with split
+        for line in self.lspci_out_decode.split("\n")[:-1]:
+            self.log_this.debug(
+                "Going to try to obtain PCI address from '" +
+                line +
+                "'"
+            )
+            try:
+                pcimatch = PCIPATT.match(line)
+                key = pcimatch.group('pciaddr')
+                value = pcimatch.group('pcival')
+                self.log_this.debug(
+                    "Got PCI address as: '" +
+                    str(key) +
+                    "' and value as '" +
+                    str(value) +
+                    "'"
+                )
+                self.lspci_dict[key] = value
+            except BaseException:
+                self.log_this.debug(
+                    "Got issue parsing PCI address of '" +
+                    line +
+                    "'"
+                )
+                continue
+        self.log_this.debug(
+            "Converted lspci output to dictionary: '" +
+            str(self.lspci_dict) +
+            "'"
+        )
+
+
+    def __check_FIPS(self, logON=True):
+        FIPS_sys_file = "/proc/sys/crypto/fips_enabled"
+        if self.__check_file_exists(FIPS_sys_file):
+            FIPS_sys_raw = self.__exec_cmd("cat " + FIPS_sys_file, True)
+            FIPS_enabled_str = FIPS_sys_raw.split('\n')[0]
+            if logON:
+                self.log_this.debug(
+                    FIPS_sys_file +
+                    " exists"
+                )
+                self.log_this.debug(
+                    "Got value of FIPS exists as " +
+                    FIPS_enabled_str
+                )
+            if FIPS_enabled_str == '0':
+                # Not enabled
+                if logON:
+                    self.log_this.debug(
+                        "FIPS is disabled in this system"
+                    )
+            else:
+                if logON:
+                    self.log_this.error(
+                        "FIPS is enabled in this system"
+                    )
+                    self.log_this.debug(
+                        "Going to exit with RC=34"
+                    )
+                sys.exit(34)
+
+
+        else:
+            # No FIPS file? We assume is not on
+            if logON:
+                self.log_this.debug(
+                    FIPS_sys_file +
+                    " does not exist. We assume FIPS is not enabled"
+                )
+
+
+
+    def __check_root_user(self, logON=True):
+        # We might need to relax this for SUDO environments, to be seen
+        effective_uid = os.getuid()
+        if logON:
+            self.log_this.debug(
+                "Got effective UID=" +
+                str(effective_uid)
+            )
+        if effective_uid == 0:
+            if logON:
+                self.log_this.debug(
+                    "The tool is being run as root or via sudo"
+                )
+        else:
+            if logON:
+                self.log_this.debug(
+                    "The tool is not being run as root or via sudo"
+                )
+            sys.exit(RED +
+                    "QUIT: " +
+                    NOCOLOR +
+                    "this tool needs to be run as root or via sudo\n")
+
+
+    def __check_memory(self):
+        self.log_this.debug(
+            "Going to check for memory requirements"
+        )
+        vm_mem_percentage = self.HW_dictionary['HOST_MEM_PCT_VM_MEM']
+        mem_reserved = self.HW_dictionary['HOST_OS_MEM_RESERVED']
+        self.log_this.debug(
+            "We are going to reserve memory for the host of " +
+            str(mem_reserved) +
+            " GB"
+        )
+        min_gb_ram = self.HW_dictionary['MIN_GB_RAM']
+        self.log_this.debug(
+            "Memory requirement for generic setups is " +
+            str(min_gb_ram) +
+            " GB"
+        )
+        min_gb_ram_small = self.HW_dictionary['MIN_GB_RAM_SMALL']
+        self.log_this.debug(
+            "Memory requirement for small setups is " +
+            str(min_gb_ram_small) +
+            " GB"
+        )
+        mem_b = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+        mem_gb = mem_b / 1024**3
+        mem_gb_str = str(float(f'{mem_gb:.2f}'))
+        self.log_this.debug(
+            "Got that this host has " +
+            mem_gb_str +
+            " GB of RAM"
+        )
+        if min_gb_ram_small <= mem_gb < min_gb_ram:
+            self.log_this.info(
+                "Host memory of " +
+                mem_gb_str +
+                " GB is less than " +
+                str(min_gb_ram) +
+                " GB required"
+            )
+            self.log_this.info(
+                "Host memory of " +
+                mem_gb_str +
+                " GB is equal or more than " +
+                str(min_gb_ram) +
+                " GB required for small setups of two or less EMS units"
+            )
+            self.small_setup = True
+        elif mem_gb < min_gb_ram_small:
+            self.log_this.error(
+                "Host memory of " +
+                mem_gb_str +
+                " GB is less than " +
+                str(min_gb_ram_small) +
+                " GB required to run even small setups"
+            )
+            self.fatal_error = True
+        else:
+            self.log_this.info(
+                "Total memory is " +
+                str(round(mem_gb,2)) +
+                " GB, which is more than the required " +
+                str(min_gb_ram) +
+                " GB"
+            )
+            # Now lets figure out how much we use from the total memory
+            # We are going to take min required or % of total, whatever
+            # is bigger
+        if self.fatal_error:
+            self.log_this.debug(
+                "We already have a fatal error not going to calculate the VM memory"
+            )
+        else:
+            self.log_this.debug(
+                "Going to calculate the VM memory"
+            )
+            if self.small_setup: # This might been set due CPU too
+                self.log_this.debug(
+                    "This is a small setup we use the small memory requirements"
+                )
+                min_gb_ram = min_gb_ram_small
+            else:
+                self.log_this.debug(
+                    "This is not a small setup, using standard requirements for memory"
+                )
+            calculated_mem_VM = round((vm_mem_percentage * mem_gb) / 100.0,0)
+            self.log_this.debug(
+                "Got calculated of " +
+                str(vm_mem_percentage) +
+                " percent of host memory as " +
+                str(calculated_mem_VM) +
+                " GB"
+            )
+            self.log_this.debug(
+                "Going to figure out what memory size is bigger, if min required of " +
+                str(min_gb_ram) +
+                " GB or percentage of total host memory of " +
+                str(calculated_mem_VM) +
+                " GB"
+            )
+            if min_gb_ram > calculated_mem_VM:
+                self.log_this.debug(
+                    "Minimum required memory of " +
+                    str(min_gb_ram) +
+                    " GB it is going to be used for VM " +
+                    "memory calculations"
+                )
+                self.VM_mem = int(min_gb_ram - mem_reserved)
+            else:
+                self.log_this.debug(
+                    "Percentage of host memory calculated as " +
+                    str(calculated_mem_VM) +
+                    " GB it is going to be used for VM " +
+                    "memory calculations"
+                )
+                self.VM_mem = int(calculated_mem_VM - mem_reserved)
+
+            if self.VM_mem <= 0:
+                self.log_this.error(
+                    "Number of VM mem GB cannot be 0 or negative"
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=14"
+                )
+                sys.exit(14)
+            else:
+                self.log_this.debug(
+                    "Set VM memory to " +
+                    str(self.VM_mem) +
+                    " GB"
+                )
+
+
+    def __check_cores(self):
+        reserved_cores = self.HW_dictionary['HOST_OS_CORES_RESERVED']
+        self.log_this.debug(
+            "We are going to keep " +
+            str(reserved_cores) +
+            " cores in the host"
+        )
+        self.log_this.debug(
+            "Going to check the cores requirement of " +
+            str(self.min_cores) +
+            " core[s]"
+        )
+        core_count = multiprocessing.cpu_count()
+        self.log_this.debug(
+            "Got that this host has " +
+            str(core_count) +
+            " core[s]"
+        )
+        if self.min_cores_small <= core_count < self.min_cores:
+            self.log_this.info(
+                "Host has " +
+                str(core_count) +
+                " core[s] which is less than " +
+                str(self.min_cores) +
+                " cores required for generic setup"
+            )
+            self.log_this.info(
+                "However " +
+                str(core_count) +
+                " core[s] which complies with " +
+                str(self.min_cores_small) +
+                " cores required for small setups of two or less ESS units"
+            )
+        elif core_count < self.min_cores_small:
+            self.log_this.error(
+                "Host has " +
+                str(core_count) +
+                " core[s] which does not comply with " +
+                str(self.min_cores_small) +
+                " cores required even for small setup"
+            )
+            self.fatal_error = True
+        else:
+            self.log_this.info(
+                "Host has " +
+                str(core_count) +
+                " core[s] which complies with " +
+                str(self.min_cores) +
+                " cores required"
+            )    
+    
+    
+        if self.fatal_error:
+            self.log_this.debug(
+                "We already have a fatal error, not calculating cores for VM"
+            )
+        else:
+            self.log_this.debug(
+                "Going to calculate the cores to be used in the VM"
+            )
+            self.VM_cores = core_count - reserved_cores
+            if self.VM_cores <= 0:
+                self.log_this.error(
+                    "Number of VM cores cannot be 0 or negative"
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=15"
+                )
+                sys.exit(15)
+            else:
+                self.log_this.debug(
+                    "Going to use " +
+                    str(self.VM_cores) +
+                    " core[s] in the VM"
+                )
+
+
+    def __check_file_exists(self, fileToCheck, allowDir=False):
+        self.log_this.debug(
+            "Going to check if " +
+            fileToCheck +
+            " exists and it is a file or a dir"
+        )
+        if allowDir:
+            self.log_this.debug(
+                "Going to check if it is a directory"
+            )
+            fileExists = os.path.isdir(fileToCheck)
+        else:
+            self.log_this.debug(
+                "Going to check if it is a file"
+            )
+            fileExists = os.path.isfile(fileToCheck)
+        if fileExists:
+            self.log_this.debug(
+                "File or directory exists check for " +
+                fileToCheck +
+                " completed and it does exist"
+            )
+        else:
+            self.log_this.debug(
+                "File or directory exists check for " +
+                fileToCheck +
+                " completed and it does not exist"
+            )
+        return fileExists
+
+
+    def __load_json(self, json_file_str):
+        # Loads  JSON into a dictionary or quits the program if it cannot.
+        try:
+            self.log_this.debug(
+                "Going to load JSON file " +
+                json_file_str
+            )
+            with open(json_file_str, "r") as json_file:
+                json_dict = json.load(json_file)
+                self.log_this.debug(
+                    "JSON file " +
+                    json_file_str +
+                    " loaded as dictionary"
+                )
+                return json_dict
+        except BaseException:
+            self.log_this.error(
+                "Cannot open or parse JSON file: '" +
+                json_file_str +
+                "'. Please check that it has JSON format"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=2"
+            )
+            sys.exit(2)
+
+
+    def __rpm_is_installed(self, rpm_package):
+        # returns the RC of rpm -q rpm_package or quits if it cannot run rpm
+        self.log_this.debug(
+            "Going to check if RPM package " +
+            rpm_package +
+            " is installed"
+        )
+        try:
+            return_code = subprocess.call(
+                ['rpm', '-q', rpm_package],
+                stdout=self.DEVNULL,
+                stderr=self.DEVNULL
+            )
+        except BaseException:
+            self.log_this.error(
+                "Cannot run 'rpm' command"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=10"
+            )
+            sys.exit(10)
+        if return_code == 0:
+            self.log_this.debug(
+                "RPM package " +
+                rpm_package +
+                " is installed in this host"
+            )
+            return 0
+        else:
+            self.log_this.debug(
+                "RPM package " +
+                rpm_package +
+                " is not installed in this host"
+            )
+            return 1
+
+
+    def __md5_chksum(self, json_file_str):
+        # Files are small not doing chunks
+        try:
+            self.log_this.debug(
+                "Going to calculate MD5 has of file " +
+                json_file_str
+            )
+            md5_hash = (hashlib.md5(open(json_file_str, 'rb').read()).hexdigest())
+            self.log_this.debug(
+                "MD5 sum of file " +
+                json_file_str +
+                " calculated as " +
+                str(md5_hash)
+            )
+            return md5_hash
+        except BaseException:
+            self.log_this.error(
+                "Cannot calculate MD5 sum of file: " +
+                json_file_str
+            )
+            self.log_this.debug(
+                "Going to exit with RC=3"
+            )
+            sys.exit(3)
+
+
+    def __md5_verify(self, json_file_str, md5_hash_expected, md5_hash_real, doNotExit=False):
+        if md5_hash_real == md5_hash_expected:
+            self.log_this.debug(
+                "For the file " +
+                json_file_str +
+                " the calculated MD5 sum " +
+                str(md5_hash_real) +
+                " and expected MD5 sum " +
+                str(md5_hash_expected) +
+                " match"
+            )
+            return True
+        else:
+            if doNotExit:
+                self.log_this.debug(
+                    "We are being called with doNotExit"
+                )
+            else:
+                self.log_this.debug(
+                    "For the file " +
+                    json_file_str +
+                    " the calculated MD5 sum " +
+                    str(md5_hash_real) +
+                    " and expected MD5 sum " +
+                    str(md5_hash_expected) +
+                    " do not match"
+                )
+                self.log_this.error(
+                    "We believe file " +
+                    json_file_str +
+                    " has been modified. If you have not modified check " +
+                    GIT_URL
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=4"
+                )
+                sys.exit(4)
+
+
+    def __connect_local_QEMU(self, check_only=False):
+        # First check service is up
+        try:
+            return_code = subprocess.call(['systemctl','is-active','libvirtd'],stdout=self.DEVNULL, stderr=self.DEVNULL)
+            self.log_this.debug(
+                "We could run 'systemctl is-active libvirtd'"
+            )
+        except BaseException:
+            self.log_this.error(
+                "Could not run 'systemctl is-active libvirtd'"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=45"
+            )
+            sys.exit(45)
+        if return_code != 0:
+            self.log_this.error(
+                "libvirtd is not running, start it now and at boot with " +
+                "'systemctl enable libvirtd --now' and run this tool again"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=46"
+            )
+            sys.exit(46)
+        # Service is UP
+        try:
+            if self.QEMU_conn:
+                self.log_this.debug(
+                    "We are already connected to 'qemu:///system'"
+                )
+                return True
+        except AttributeError:
+            self.log_this.debug(
+                "We are not connected to 'qemu:///system'"
+        )
+        try:
+            self.log_this.debug(
+                "Going to load external python3 lib libvirt"
+            )
+            import libvirt
+        except BaseException:
+            self.log_this.debug(
+                "Failure to load external python3 lib libvirt"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=20"
+            )
+
+        try:
+            self.QEMU_conn = libvirt.open('qemu:///system')
+            if not self.QEMU_conn:
+                self.log_this.error(
+                "Cannot connect to 'qemu:///system'. KVM needs to be running in this host"
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=21"
+                )
+                sys.exit(21)
+            self.log_this.debug(
+                "Connected to 'qemu:///system'"
+            )
+        except BaseException:
+            self.log_this.error(
+                "Cannot connect to 'qemu:///system'. KVM needs to be running in this host"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=21"
+            )
+            sys.exit(21)
+        self.log_this.debug(
+            "Going to confirm we are connected to local system not another one"
+        )
+        kvm_hostname = self.QEMU_conn.getHostname()
+        if self.hostname == kvm_hostname:
+            self.log_this.debug(
+                "Short hostname " +
+                self.hostname +
+                " matches KVM hostname " +
+                kvm_hostname
+            )
+        elif self.long_hostname == kvm_hostname:
+            self.log_this.debug(
+                "Long hostname " +
+                self.long_hostname +
+                " matches KVM hostname " +
+                kvm_hostname
+            )
+        else:
+            self.log_this.error(
+                "Connected KVM host '" +
+                kvm_hostname +
+                "' does not match local short hostname '" +
+                self.hostname +
+                "' or hostname '" +
+                self.long_hostname +
+                "' matches KVM hostname. We refuse to continue"
+            )
+            self.__disconnect_local_QEMU()
+            self.log_this.debug(
+                "Going to exit with RC=22"
+            )
+            sys.exit(22)
+        if check_only:
+            self.log_this.info(
+                "Can connect to 'qemu:///system' and it is this host"
+            )
+
+
+    def __disconnect_local_QEMU(self):
+        self.log_this.debug(
+            "Going to disconnect from local QEMU"
+        )
+        try:
+            self.QEMU_conn.close()
+            self.log_this.debug(
+                "Disconnected to 'qemu:///system'"
+            )
+        except BaseException:
+            self.log_this.debug(
+                "Cannot disconnect to 'qemu:///system'"
+            )
+
+
+    def __check_KVM_storage_pool(self):
+        self.log_this.debug(
+            "Going to check KVM storage pool"
+        )
+        self.__connect_local_QEMU()
+        try:
+            stgpool = self.QEMU_conn.storagePoolLookupByName(self.KVM_stgpool_name)
+            pool_exists = True
+            self.log_this.info(
+                "KVM storage pool " +
+                self.KVM_stgpool_name +
+                " already exists"
+            )
+            pool_exists = True
+        except BaseException:
+            self.log_this.debug(
+                "KVM storage pool " +
+                self.KVM_stgpool_name +
+                " already exists"
+            )
+            pool_exists = False
+        if not pool_exists:
+            self.log_this.warning(
+                "KVM storage pool " +
+                self.KVM_stgpool_name +
+                " does not exist. Going to create it"
+            )
+            self.__create_KVM_storage_pool()
+
+
+    def __craft_PCI_XML(self):
+        # <hostdev mode='subsystem' type='pci' managed='yes'>
+        #    <driver name='vfio' />
+        #    <source>
+        #        <address domain='0x0000' bus='0x08' slot='0x00' function='0x0'/> <!-- This is the actual host PCI address -->
+        #    </source>
+        #    <alias name='hostdev0' /> <!-- hostdev0 name should be across all passthru device like hostdev0, hostdev1 .... -->
+        #    <address type="pci" domain='0000' bus='0x05' slot='0x00' function='0x0' /> <!- This is VM PCI address formation for the passthru device -->
+        # </hostdev>
+
+        self.log_this.debug(
+            "Going to craft XML part for PCI devices"
+        )
+        self.xml_vm_pci = ""
+        count = 1
+        # The first four are LSN, rest HSN
+        for XML_friendly_address in self.XML_friendly:
+            self.log_this.debug(
+                "Going to populate XML for " +
+                str(XML_friendly_address)
+            )
+            self.xml_vm_pci = self.xml_vm_pci + """
+            <hostdev mode='subsystem' type='pci' managed='yes'>
+                <driver name='vfio' />
+                <source>
+                    <address domain='0x""" + \
+                    XML_friendly_address[0] + \
+                    """' bus='0x""" + \
+                    XML_friendly_address[1] + \
+                    """' slot='0x""" + \
+                    XML_friendly_address[2] + \
+                    """' function='0x""" + \
+                    XML_friendly_address[3] + \
+                    """'/>
+                </source>
+                <alias name='hostdev""" + str(count) + """' />
+                <address type="pci" domain='0x0000' bus='0x04' slot='0x""" + str(count) + """' function='0x0' />
+            </hostdev>
+            """
+            count = count + 1
+        self.log_this.debug(
+            "Crafted PCI XML part as " +
+            str(self.xml_vm_pci)
+        )
+
+
+    def __convert_PCI_XML(self):
+        self.XML_friendly = []
+        self.log_this.debug(
+            "Going to covert LSN PCI addresses into XML friendly list"
+        )
+        # There are four and four only LSN ports
+        for single_LSN_PCI_address in self.LSN_PCI_address:
+            self.log_this.debug(
+                "Going to process LSN PCI address " +
+                str(single_LSN_PCI_address)
+            )
+            port_list = re.split(':|\.', str(single_LSN_PCI_address))
+            self.log_this.debug(
+                "Transformed into list " +
+                str(port_list)
+            )
+            self.XML_friendly.append(port_list)
+            self.log_this.debug(
+                "Appended into LSN_XML_friendly"
+            )
+        if len(self.XML_friendly) == 4:
+            self.log_this.debug(
+                "Got all four LSN PCI addresses transformed into XML friendly list"
+            )
+        else:
+            self.log_this.debug(
+                "No four LSN PCI addressed could be parsed"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=35"
+            )
+            sys.exit(35)
+        self.log_this.debug(
+            "Going to parse the HSN PCI addresses into XML friendly list"
+        )
+        for single_HSN_PCI_address in self.HSN_PCI_address:
+            self.log_this.debug(
+                "Going to process HSN PCI address " +
+                str(single_HSN_PCI_address)
+            )
+            port_list = re.split(':|\.', str(single_HSN_PCI_address))
+            self.log_this.debug(
+                "Transformed into list " +
+                str(port_list)
+            )
+            self.XML_friendly.append(port_list)
+            self.log_this.debug(
+                "Appended into XML_friendly"
+            )
+        self.log_this.debug(
+            "Got all HSN PCI addresses trasnformed into XML friendly list"
+        )
+        self.log_this.debug(
+            "Got PCI XML friendly list: " +
+            str(self.XML_friendly)
+        )
+        # We must have 2..6 HSN ports, plus the 4 LSN
+        if len(self.XML_friendly) >= 6 and len(self.XML_friendly) <= 10:
+            self.log_this.debug(
+                "There are 2 to 6 HSN ports"
+            )
+        else:
+            self.log_this.error(
+                "There are less than two HSN ports or more than six HSN ports"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=37"
+            )
+            sys.exit(37)
+
+
+    def __create_KVM_VM(self):
+        self.log_this.debug(
+            "Going to create the KVM domain"
+        )
+        vmUID = self.__exec_cmd("uuidgen", decode=True).strip("\n")
+        self.log_this.debug(
+            "Generated UUID: " +
+            vmUID
+        )
+        mySerial = random.randrange(1000000,99999999)
+        self.log_this.debug(
+            "Generated serial number: " +
+            str(mySerial)
+        )
+        self.__convert_PCI_XML()
+
+        xml_vm_begin = """
+            <domain type='kvm'>
+            <name>""" + self.KVM_VM_name + """</name>
+            <uuid>""" + vmUID + """</uuid>
+            <description>EMSVM</description>
+
+            <memory unit='GiB'>""" + str(self.VM_mem) + """</memory>
+            <currentMemory unit='GiB'>""" + str(self.VM_mem) + """</currentMemory>
+            <vcpu placement='static'>""" + str(self.VM_cores) + """</vcpu>
+            <sysinfo type='smbios'>
+                <bios>
+                <entry name='vendor'>IBM</entry>
+                </bios>
+                <system>
+                <entry name='product'>""" + PROGRAM_NAME.upper() + """</entry>
+                <entry name='version'>""" + VERSION + """</entry>
+                <entry name='serial'>""" + str(mySerial) + """</entry>
+                </system>
+            </sysinfo>
+            <os>
+                <type arch='x86_64'>hvm</type>
+                <boot dev='hd'/>
+                <smbios mode='sysinfo'/>
+            </os>
+            <features>
+                <acpi/>
+                <apic/>
+                <hyperv mode='custom'>
+                <relaxed state='on'/>
+                <vapic state='on'/>
+                <spinlocks state='on' retries='8191'/>
+                </hyperv>
+            </features>
+            <on_poweroff>destroy</on_poweroff>
+            <on_reboot>restart</on_reboot>
+            <on_crash>restart</on_crash>
+            <pm>
+                <suspend-to-mem enabled='no'/>
+                <suspend-to-disk enabled='no'/>
+            </pm>
+            <devices>
+                <emulator>/usr/libexec/qemu-kvm</emulator>
+                <disk type='file' device='disk'>
+                <driver name='qemu' type='qcow2' cache='none' io='threads' discard='unmap' detect_zeroes='on'/>
+                <source file='""" + self.VMFileFullURL + """'/>
+                <target dev='sda' bus='sata'/>
+                <address type='drive' controller='0' bus='0' target='0' unit='0'/>
+                </disk>
+                <console type="pty">
+                <target type="serial" port="0"/>
+                </console>
+            """
+
+        xml_vm_end = """
+            </devices>
+            </domain>
+        """
+        self.__craft_PCI_XML()
+        xml_vm = xml_vm_begin + self.xml_vm_pci + xml_vm_end
+
+        self.log_this.debug(
+            "Crafted KVM VM domain: " +
+            xml_vm
+        )
+        self.log_this.debug(
+            "Going to create KVM VM domain pool with the crafted XML"
+        )
+        try:
+            self.QEMU_conn.defineXML(xml_vm)
+            self.EMSVM_dom = self.QEMU_conn.lookupByName(self.KVM_VM_name)
+            self.log_this.info(
+                "KVM VM has been created"
+            )
+        except BaseException:
+            self.log_this.error(
+                "Unexpected issue while KVM VM creation"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=29"
+            )
+            sys.exit(29)
+
+        self.log_this.debug(
+            "Going to set " +
+            self.EMSVM_dom.name() +
+            " to autostart"
+        )
+        try:
+            self.EMSVM_dom.setAutostart(1)
+            self.log_this.info(
+                "KVM VM domain " +
+                self.EMSVM_dom.name() +
+                " is set to autostart"
+            )
+        except BaseException:
+            self.log_this.error(
+                "Failed to set KVM VM domain " +
+                self.EMSVM_dom.name() +
+                " to autostart"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=30"
+            )
+            sys.exit(30)
+
+
+    def __ask_host_license(self):
+        self.log_this.debug(
+            "Going to ask the customer about the host RedHat subscription"
+        )
+        while True:
+            try:
+                self.log_this.info("Do you have a valid RedHat subscription for this host? (y/n): ")
+                redhat_subscription_user_confirm = input()
+            except KeyboardInterrupt:
+                self.log_this.info(
+                    "User cancelled Redhat subscription question"
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=42"
+                )
+                sys.exit(42)
+            if redhat_subscription_user_confirm.lower() == 'y':
+                self.log_this.debug(
+                    "User certifies that the host has a valid RedHat subscription"
+                )
+                break
+            elif redhat_subscription_user_confirm.lower() == 'n':
+                self.log_this.info(
+                    "User does not certify that the host has a valid RedHat subscription"
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=42"
+                )
+                sys.exit(42)
+            else:
+                self.log_this.warning(
+                    "We do not understand your input '" +
+                    str(redhat_subscription_user_confirm) +
+                    "', we ask again."
+                )
+
+
+    def __create_KVM_storage_pool(self):
+        self.__connect_local_QEMU()
+        self.log_this.debug(
+            "Going to create KVM storage pool"
+        )
+        stgpoolUID = self.__exec_cmd("uuidgen", decode=True).strip("\n")
+        self.log_this.debug(
+            "Generated UUID: " +
+            stgpoolUID
+        )
+        try:
+            libvirt_GID_str = str(grp.getgrnam("libvirt")[2])
+            self.log_this.debug(
+                "Got GID=" +
+                libvirt_GID_str +
+                " for libvirt"
+            )
+        except BaseException:
+            self.log_this.error(
+                "Cannot obtain GID of group libvirt"
+            )
+            self.log_this.error(
+                "Going to exit with RC=24"
+            )
+            sys.exit(24)
+        xml_stgpool = """
+            <pool type="dir">
+            <name>""" + self.KVM_stgpool_name + """</name>
+            <uuid>""" + stgpoolUID + """</uuid>
+            <capacity unit='bytes'>0</capacity>
+            <allocation unit='bytes'>0</allocation>
+            <available unit='bytes'>0</available>
+            <source>
+            </source>
+            <target>
+                <path>""" + self.fs_vm + """</path>
+            </target>
+            </pool>"""
+
+        self.log_this.debug(
+            "Crafted KVM storage pool: " +
+            xml_stgpool
+        )
+        self.log_this.debug(
+            "Going to create KVM storage pool with the crafted XML"
+        )
+        try:
+            stgpool = self.QEMU_conn.storagePoolDefineXML(xml_stgpool, 0)
+            self.log_this.debug(
+                "KVM Storage pool created"
+            )
+            pool_created = True
+        except BaseException:
+            self.log_this.debug(
+                "KVM Storage pool not created"
+            )
+            pool_created = False
+        if pool_created:
+            self.log_this.info(
+                "KVM storage pool " +
+                self.KVM_stgpool_name +
+                " has been created"
+            )
+        else:
+            self.log_this.error(
+                "Cannot create KVM storage pool " +
+                self.KVM_stgpool_name
+            )
+            self.log_this.debug(
+                "Going to exit with RC=23"
+            )
+            sys.exit(23)
+
+        # Lets connect it
+        poolIsActive = stgpool.isActive()
+        if poolIsActive:
+            self.log_this.debug(
+                "KVM storage pool " +
+                self.KVM_stgpool_name +
+                " is already active"
+            )
+        else:
+            self.log_this.debug(
+                "KVM storage pool " +
+                self.KVM_stgpool_name +
+                " is not active"
+            )
+            try:
+                stgpool.create(1)
+                self.log_this.info(
+                    "KVM storage pool has been activated"
+                )
+            except BaseException:
+                self.log_this.error(
+                    "Could not activate KVM storage pool " +
+                    self.KVM_stgpool_name
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=25"
+                )
+                sys.exit(25)
+
+        # Lets set to autostart
+        poolToAutostart = stgpool.autostart()
+        if poolToAutostart:
+            self.log_this.debug(
+                "KVM storage pool " +
+                self.KVM_stgpool_name +
+                " it is already set to autostart"
+            )
+        else:
+            self.log_this.debug(
+                "KVM storage pool " +
+                self.KVM_stgpool_name +
+                " it is not set to autostart"
+            )
+            try:
+                stgpool.setAutostart(1)
+                self.log_this.info(
+                    "KVM storage pool " +
+                    self.KVM_stgpool_name +
+                    " it is now set to autostart"
+                )
+            except BaseException:
+                self.log_this.debug(
+                    "Could not set KVM storage pool " +
+                    self.KVM_stgpool_name +
+                    " to autostart"
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=26"
+                )
+                sys.exit(26)
+
+        self.__disconnect_local_QEMU()
+
+
+    def __check_fs(self):
+        self.log_this.debug(
+            "Going to check if " +
+            self.fs_vm +
+            " has at least " +
+            str(self.min_gb_fs_size) +
+            " GB free"
+        )
+        path_exists = self.__check_file_exists(self.fs_vm, allowDir=True)
+        if path_exists:
+            try:
+                statvfs_fs_vm = os.statvfs(self.fs_vm)
+                self.fs_size = round(\
+                    (statvfs_fs_vm.f_frsize * statvfs_fs_vm.f_blocks) / \
+                    ( 1024 ** 3), 2)
+                self.fs_free = round(\
+                    (statvfs_fs_vm.f_frsize * statvfs_fs_vm.f_bfree) / \
+                    (1024 ** 3), 2)
+                self.fs_free_excluded = round(\
+                    (statvfs_fs_vm.f_frsize * statvfs_fs_vm.f_bavail) / \
+                    (1024 ** 3), 2)
+            except BaseException:
+                self.log_this.error(
+                    "Got an unexpected issue when getting the file system information of " +
+                    self.fs_vm
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=11"
+                )
+                sys.exit(11)
+
+            self.log_this.debug(
+                "Got that FS where path " +
+                self.fs_vm +
+                " belongs has a size of " +
+                str(self.fs_size) +
+                " GB, free space of " +
+                str(self.fs_free) +
+                " GB and free space excluding reserved space of " +
+                str(self.fs_free_excluded) +
+                " GB"
+            )
+            self.log_this.debug(
+                "Going to check if current free space excluding reserved of " +
+                self.fs_vm +
+                " with " +
+                str(self.fs_free_excluded) +
+                " GB is more than minimun required of " +
+                str(self.min_gb_fs_size)
+            )
+            # If file is there already lets add that to the "free" space
+            if self.__check_file_exists(self.VMFileFullURL):
+                
+                self.__check_KVM_storage_pool()
+
+                self.log_this.debug(
+                    "EMSVM virtual disk file already exists, need to account for that size"
+                )
+                self.vHDDfileSizeGb = round(os.stat(self.VMFileFullURL).st_size / (1024 ** 3), 2)
+                self.log_this.debug(
+                    "Got EMSVM virtual disk size as " +
+                    str(self.vHDDfileSizeGb) +
+                    " GB"
+                )
+                self.vHDDfileSizeGB_allocated = self.__getAllocatedSizeOfVirtualDisk()
+                self.fs_free_excluded = round(self.fs_free_excluded + self.vHDDfileSizeGB_allocated, 2)
+                self.log_this.debug(
+                    "New free plus allocated space set to " +
+                    str(self.fs_free_excluded) +
+                    " GB"
+                )
+
+            if self.min_gb_fs_size >= self.fs_free_excluded:
+                self.log_this.error(
+                    "The path " +
+                    self.fs_vm +
+                    " has " +
+                    str(self.fs_free_excluded) +
+                    " GB free excluding reserved space which is less than the required " +
+                    str(self.min_gb_fs_size) +
+                    " GB"
+                )
+                self.fatal_error = True
+            else:
+                self.log_this.info(
+                    "The path " +
+                    self.fs_vm +
+                    " has " +
+                    str(self.fs_free_excluded) +
+                    " GB free excluding reserved space which is more than the required " +
+                    str(self.min_gb_fs_size) +
+                    " GB"
+                )
+        else:
+            self.log_this.error(
+                "Path " +
+                self.fs_vm +
+                " does not exist"
+            )
+            self.fatal_error = True
+
+
+    def __getAllocatedSizeOfVirtualDisk(self):
+        self.log_this.debug(
+            "Going to get the allocated in disk size of EMSVM vHDD"
+        )
+        statCmd = r'stat --format="%s" ' + self.VMFileFullURL
+        volAllocationBytes = self.__exec_cmd(statCmd,decode=True).split("\n")[0]
+        self.log_this.debug(
+            "stat reports " +
+            str(volAllocationBytes) +
+            " bytes"
+        )
+        volAllocationGBytes = round(float(volAllocationBytes) / (1024 ** 3), 2)
+        self.log_this.debug(
+            "Got volume allocation of " +
+            str(volAllocationGBytes) +
+            " GB"
+        )
+        return volAllocationGBytes
+
+
+    def __check_KVM_exec(self, check_machine=False):
+        self.log_this.debug(
+            "Going to check if " +
+            self.KVM_exec +
+            " exists"
+        )
+        if (self.__check_file_exists(self.KVM_exec)):
+            self.log_this.info(
+                "KVM executable file " +
+                self.KVM_exec +
+                " exists"
+            )
+        else:
+            self.log_this.error(
+                "KVM executable file " +
+                self.KVM_exec +
+                " does not exist"
+            )
+            self.fatal_error = True
+
+        if check_machine:
+            self.__connect_local_QEMU()
+            QEMU_capabilities = self.QEMU_conn.getCapabilities()
+            self.log_this.debug(
+                "Got QEMU KVM capabilities as: " +
+                QEMU_capabilities
+            )
+            self.log_this.debug(
+                "Going to check if " +
+                self.KVM_machine +
+                " machine capability is in this host"
+            )
+            if self.KVM_machine in QEMU_capabilities:
+                self.log_this.info(
+                    "KVM QEMU machine capability " +
+                    self.KVM_machine +
+                    " exists in this host"
+                )
+            else:
+                self.log_this.error(
+                    "KVM QEMU machine capability " +
+                    self.KVM_machine +
+                    " does not exist in this host"
+                )
+                self.fatal_error = True
+
+
+
+    def __get_host_info(self):
+        self.log_this.debug(
+            "Going to get some information of this host"
+        )
+        basic_info_subcmd = [
+            'system-version',
+            'system-product-name',
+            'system-family',
+            'system-serial-number',
+            'processor-family',
+            'bios-version'
+        ]
+        for subcommand in basic_info_subcmd:
+            self.log_this.debug(
+                "Going to query dmidecode -s " +
+                subcommand
+            )
+            try:
+                dmidecode_output = subprocess.getoutput(
+                "dmidecode -s " + subcommand
+            )
+            except BaseException:
+                self.log_this.debug(
+                    "Could not run " +
+                    "dmidecode -s " +
+                    subcommand
+                )
+            self.log_this.debug(
+                "Got " +
+                subcommand +
+                " output: '" +
+                dmidecode_output +
+                "'"
+            )
+        self.lspci_out = self.__exec_cmd("lspci", decode=False)
+        self.log_this.debug(
+            "lspci output witouth decode: '" +
+            str(self.lspci_out) +
+            "'"
+        )
+        self.lspci_out_decode = self.__exec_cmd("lspci -D ", decode=True)
+        self.log_this.debug(
+            "lspci output wiht decode utf-8: '" +
+            str(self.lspci_out_decode) +
+            "'"
+        )
+        self.__convert_lspci_to_dict()
+
+
+    def __exec_cmd(self, command, decode):
+        self.log_this.debug(
+            "going to run command: '" +
+            command +
+            "'"
+        )
+        try:
+            run_cmd = subprocess.Popen(shlex.split(command), stdout=subprocess.PIPE)
+            cmd_output, cmd_stderr = run_cmd.communicate()
+            self.log_this.debug(
+                "Got stdout=" +
+                str(cmd_output)
+            )
+            self.log_this.debug(
+                "Got stderr=" +
+                str(cmd_stderr)
+            )
+            if decode:
+                return cmd_output.decode('utf-8')
+            else:
+                return cmd_output.strip()
+
+        except BaseException:
+            self.log_this.error(
+                "Fatal error running command '" +
+                command +
+                "'"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=12"
+            )
+            sys.exit(12)
+
+
+    def __dump_rpms(self):
+        self.log_this.debug(
+            "Going to query all RPM packages in this host"
+        )
+        rpmQueryCmd = "rpm -qa"
+        rpmQueryOut = self.__exec_cmd(rpmQueryCmd, decode=True)
+        self.log_this.debug(
+            "Got output for RPM query as: " +
+            rpmQueryOut
+        )
+
+
+    def __dump_nodedev_list(self):
+        self.log_this.debug(
+            "Going to query all IOMMU groups in this host"
+        )
+        iommuGroupcmd = "virsh nodedev-list --tree"
+        iommuGroupout = self.__exec_cmd(iommuGroupcmd, decode=True)
+        self.log_this.debug(
+            "Got output for IOMMU groups query as: " +
+            iommuGroupout
+        )
+
+
+    def __check_KVM_capable(self):
+        self.log_this.debug(
+            "Going to check if this host is KVM capable"
+        )
+        cpuinfo_out = self.__exec_cmd("cat /proc/cpuinfo", decode=True)
+        regex_to_check = r'.*(vmx|svm).*'
+        is_KVM_capable_re = re.compile(regex_to_check, re.MULTILINE)
+        is_KVM_capable = is_KVM_capable_re.search(cpuinfo_out)
+        if is_KVM_capable:
+            self.log_this.info(
+                "This host CPU[s] are KVM capable and has extensions enabled"
+            )
+            check_KVM_dev = True
+        else:
+            self.log_this.error(
+                "This host CPU[s] are not KVM capable or has extensions disabled"
+            )
+            self.fatal_error = True
+            check_KVM_dev = False
+
+        if check_KVM_dev:
+            self.log_this.info(
+                "Going to check if /dev/kvm exists"
+            )
+            # Cannot use __check_file_exists as this is a device
+            KVM_dev_exists = os.path.exists("/dev/kvm")
+            if KVM_dev_exists:
+                self.log_this.info(
+                    "The device /dev/kvm exists"
+                )
+            else:
+                self.log_this.error(
+                    "The device /dev/kvm does not exist"
+                )
+                self.fatal_error = True
+
+
+    def __check_processor(self):
+        self.log_this.debug(
+            "Going to check processor compatibility"
+        )
+        self.processor = platform.processor()
+        if self.processor == 'x86_64':
+            self.log_this.debug(
+                "This processor architecture is supported to run EMSVM"
+            )
+            self.log_this.debug(
+                "Going to get socket[s] information"
+            )
+            self.__get_sockets_and_version()
+
+            self.log_this.debug(
+                "Going to check for AMD EPYC processor and minimun model required"
+            )
+            self.__check_is_AMD()
+            if self.is_AMD_EPYC:
+                self.log_this.debug(
+                    "As this is AMD EPYC, going to check generation"
+                )
+                self.__check_AMD_EPYC_generation()
+            self.__check_number_of_sockets()
+
+        else:
+            self.log_this.error(
+                "This processor architecture is not supported to run EMSVM"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=5"
+            )
+            sys.exit(5)
+
+
+    def __get_sockets_and_version(self):
+        self.log_this.debug(
+            "Going to query number of sockets and version using dmidecode cli"
+        )
+        dmidecode_cmd = "dmidecode -s processor-version"
+        dmidecode_out = self.__exec_cmd(dmidecode_cmd, decode=True)
+        self.log_this.debug(
+            "Got " +
+            str(dmidecode_out)
+        )
+        dmidecode_str = dmidecode_out[:dmidecode_out.rfind('\n')]
+        self.log_this.debug(
+            "Cleaned last blank line from output, string to process is: " +
+            str(dmidecode_str)
+        )
+        dmidecode_list = dmidecode_str.split("\n")
+        self.log_this.debug(
+            "Converted to list " +
+            str(dmidecode_list)
+        )
+        self.sockets_num = len(dmidecode_list)
+        if len == 0:
+            self.log_this.debug(
+                "Cannot query number of sockets in this system, got it has zero sockets"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=1"
+            )
+            sys.exit(1)
+        self.log_this.debug(
+            "Got " +
+            str(self.sockets_num) +
+            " socket[s] in this host"
+        )
+
+        self.socket_version = dmidecode_list[0].strip()
+        self.log_this.debug(
+            "Got processor version as '" +
+            str(self.socket_version) +
+            "'"
+        )
+
+
+    def __check_number_of_sockets(self):
+        self.log_this.debug(
+            "Going to check number of sockets of this host"
+        )
+        self.log_this.debug(
+            "This system reports " +
+            str(self.sockets_num) +
+            " socket[s]"
+        )
+        if self.sockets_num > 2:
+            self.log_this.error(
+                "This system has more than two sockets"
+            )
+            self.fatal_error = True
+        elif self.sockets_num == 0:
+            self.log_this.error(
+                "This system reports zero sockes"
+            )
+            self.log_this.debug(
+                "Going ot exit with RC=1"
+            )
+            sys.exit(1)
+        else:
+            self.log_this.debug(
+                "This system has " +
+                str(self.sockets_num) +
+                " socket[s]"
+            )
+
+    def __check_is_AMD(self):
+        self.log_this.debug(
+            "Going to indetify if this is an AMD EPYC processor"
+        )
+        pattern_is_AMD_EPYC = re.compile(r'AMD.+EPYC')
+        self.is_AMD_EPYC = pattern_is_AMD_EPYC.search(self.socket_version)
+        if self.is_AMD_EPYC:
+            self.log_this.info(
+                "This system is AMD EPYC based"
+            )
+        else:
+            self.log_this.error(
+                "This system is not AMD EPYC based"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=5"
+            )
+            sys.exit(5)
+
+    
+    def __check_emsvm_dir_device(self):
+        self.log_this.debug(
+            "Going to check if /emsvm is local storage, this check has holes"
+        )
+        
+        self.log_this.debug(
+            "Going to check if " + self.fs_vm
+        )
+        essvmIsMount = os.path.ismount(self.fs_vm)
+        if essvmIsMount:
+            self.log_this.debug(
+                self.fs_vm +
+                " is a mount point"
+            )
+            dfCmd = "df --output=source " + self.fs_vm
+            dfOutput = self.__exec_cmd(dfCmd, decode=True).split("\n")[1]
+            self.log_this.debug(
+                "Got device for " +
+                self.fs_vm +
+                " as " +
+                dfOutput
+            )
+        else:
+            self.log_this.debug(
+                self.fs_vm +
+                " is not a mount point. Going to check device for /"
+            )
+            dfCmd = "df --output=source /"
+            dfOutput = self.__exec_cmd(dfCmd, decode=True).split("\n")[1]
+            self.log_this.debug(
+                "Got device for / as " +
+                dfOutput
+            )
+            # Too risky to check if local and fail, lets just gather info
+        self.log_this.debug(
+            "Going to get output of lsscsi"
+        )
+        lsscsiOutput = self.__exec_cmd("lsscsi", decode=True)
+        self.log_this.debug(
+            "Got output of lsscsi as: " +
+            lsscsiOutput
+        )
+        self.log_this.debug(
+            "Going to get output of df -h"
+        )
+        dfhOutput = self.__exec_cmd("df -h", decode=True)
+        self.log_this.debug(
+            "Got output of df -h as: " +
+            dfhOutput
+        )
+
+
+    def __mmlscluster_bin_exists(self):
+        self.log_this.debug(
+            "Going to check if mmlscluster binary exists"
+        )
+        mmlscluster_bin_OK = os.path.isfile('/usr/lpp/mmfs/bin/mmlscluster')
+        if mmlscluster_bin_OK:
+            self.log_this.debug(
+                "mmlscluster binary exists"
+            )
+            self.log_this.error(
+                "This node seems to have Spectrum Scale installed, this is not supported"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=41"
+            )
+            sys.exit(41)
+        else:
+            self.log_this.debug(
+                "mmlslcuster binary does not exists"
+            )
+
+
+    def __check_AMD_EPYC_generation(self):
+        self.log_this.debug(
+            "Going to look for supported AMD processor models"
+        )
+        # AMD EPYC ABCD[P]
+        # A = Product Series 3 = Embedded 7 = High Performance
+        # BC = Perf level BC = Hx -> High Performance Fx/xF -> Frequence optimized
+        # D = Generation 1 Naples 2 Rome 3 Milan
+        self.log_this.debug(
+            "Going to check " +
+            str(self.socket_version)
+        )
+        pattern_EPYC_1st_gen = re.compile(r'EPYC\s\d{3}1')
+        is_EPYC_1st_gen = pattern_EPYC_1st_gen.search(self.socket_version)
+        if is_EPYC_1st_gen:
+            self.fatal_error = True
+            self.log_this.error(
+                "This host has AMD EPYC 1st Generation (Naples)"
+            )
+        else:
+            self.log_this.info(
+                "This host does not have AMD EPYC 1st Generation (Naples)"
+            )
+
+
+    def __checkVMFile(self):
+        self.log_this.debug(
+            "Going to check " +
+            self.VMFileFullURL
+        )
+        file_exists = self.__check_file_exists(self.VMFileFullURL)
+        if file_exists:
+            self.log_this.debug(
+                "File " +
+                self.VMFileFullURL +
+                " exists, so this file has been already installed"
+            )
+            return True
+        else:
+            self.log_this.debug(
+                "Virtual disk file does not exist. Lets check if compressed version is there"
+            )
+            compressedDiskFile = self.VMFileFullURL + ".xz"
+            file_exists = self.__check_file_exists(compressedDiskFile)
+            if file_exists:
+                self.log_this.debug(
+                    "Compressed virtual disk file " +
+                    compressedDiskFile + 
+                    " exists"
+                )
+
+                self.log_this.info(
+                    "Going to calculate MD5 sum of " +
+                    compressedDiskFile +
+                    ". It is going to take some time, please wait"
+                )
+
+                localEMSVMDiskFileMD5 = self.__md5_chksum(compressedDiskFile)
+                if localEMSVMDiskFileMD5 in self.VM_DISK_MD5:
+                    fileMD5OK = True
+                    self.log_this.debug(
+                        "Found MD5 match for EMSVM compressed disk file"
+                    )
+                else:
+                    fileMD5OK = False
+                    self.log_this.error(
+                        "Did not found MD5 match for EMSVM compressed disk file"
+                    )
+                if fileMD5OK:
+                    self.log_this.info(
+                        "MD5 of " +
+                        compressedDiskFile +
+                        " is OK"
+                    )
+                    self.log_this.info(
+                        "Going to uncompress the file, please wait"
+                    )
+                    self.__uncompressFile(compressedDiskFile)
+                else:
+                    self.log_this.error(
+                        "MD5 of " +
+                        compressedDiskFile +
+                        " is NOK. Please download again the file"
+                    )
+                    self.log_this(
+                        "Going to exit with RC=4"
+                    )
+                    sys.exit(4)
+            else:
+                self.log_this.error(
+                    "EMSVM compressed disk file " +
+                    compressedDiskFile +
+                    " does not exist. Download the file from IBM and place it on the expected directory"
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=13"
+                )
+                sys.exit(13)
+        
+
+    def __uncompressFile(self, compressedFile):
+        self.log_this.debug(
+            "Going to uncompress XZ file " +
+            compressedFile
+        )
+        fileEncoding = mimetypes.guess_type(compressedFile)[1]
+        if fileEncoding == "xz":
+            self.log_this.debug(
+                "The encoding of the file is XZ, we uncompress it now"
+            )
+            uncompressCmd = "xz -d -T 0 " + compressedFile
+            output = self.__exec_cmd(uncompressCmd, decode=True)
+            self.log_this.info(
+                "File " +
+                compressedFile + 
+                " has been uncompressed"
+            )
+            self.log_this.debug(
+                "The output from the extraction, if any, was: " +
+                str(output)
+            )
+
+
+
+    def __load_json_files(self):
+        self.log_this.debug(
+            "Going to load the JSON files"
+        )
+        for jsonFile in self.jsonFilesList:
+            file_exists = self.__check_file_exists("./" + jsonFile)
+            if file_exists:
+                self.log_this.debug(
+                    "Going to load file " +
+                    jsonFile
+                )
+                if jsonFile == "supported_OS.json":
+                    self.log_this.debug(
+                        "This is the supported OS file"
+                    )
+                    self.log_this.debug(
+                        "Going to check the MD5 sum of this file"
+                    )
+                    self.__md5_verify(
+                        "./" + jsonFile,
+                        self.SUPPORTED_OS_MD5,
+                        self.__md5_chksum("./" + jsonFile,)
+                    )
+                    self.os_dictionary = self.__load_json("./" + jsonFile)
+                    self.log_this.debug(
+                        "Supported OS file loaded into dictionary with version " +
+                        self.os_dictionary['json_version']
+                    )
+                elif jsonFile == "NIC_adapters.json":
+                    self.log_this.debug(
+                        "This is the NIC adapters file"
+                    )
+                    self.log_this.debug(
+                        "Going to calculate the MD5 sum of this file"
+                    )
+                    self.__md5_verify(
+                        "./" + jsonFile,
+                        self.NIC_ADAPTERS_MD5,
+                        self.__md5_chksum("./" + jsonFile,)
+                    )
+                    self.NIC_dictionary = self.__load_json("./" + jsonFile)
+                    self.log_this.debug(
+                        "NIC adapters file loaded into dictionary with version " +
+                        self.NIC_dictionary['json_version']
+                    )
+                elif jsonFile == "packages.json":
+                    self.log_this.debug(
+                        "This is the packages file"
+                    )
+                    self.log_this.debug(
+                        "Going to calculate the MD5 sum of this file"
+                    )
+                    self.__md5_verify(
+                        "./" + jsonFile,
+                        self.PACKAGES_MD5,
+                        self.__md5_chksum("./" + jsonFile,)
+                    )
+                    self.packages_dictionary = self.__load_json("./" + jsonFile)
+                    self.log_this.debug(
+                        "Packages file loaded into dictionary with version " +
+                        self.packages_dictionary['json_version']
+                    )
+                elif jsonFile == "HW_requirements.json":
+                    self.log_this.debug(
+                        "This is the HW requirements file"
+                    )
+                    self.log_this.debug(
+                        "Going to calculate the MD5 sum of this file"
+                    )
+                    self.__md5_verify(
+                        "./" + jsonFile,
+                        self.HW_REQUIREMENTS_MD5,
+                        self.__md5_chksum("./" + jsonFile,)
+                    )
+                    self.HW_dictionary = self.__load_json("./" + jsonFile)
+                    self.log_this.debug(
+                        "HW requirements file loaded into dictionary with version " +
+                        self.HW_dictionary['json_version']
+                    )
+                else:
+                    self.log_this.error(
+                        "We are processing file " +
+                        jsonFile +
+                        ". However this file is not expected, likely a bug of this tool"
+                    )
+                    self.log_this.debug(
+                        "Going to exit with RC=6"
+                    )
+                    sys.exit(6)
+            else:
+                self.log_this.error(
+                    "JSON file ./" +
+                    jsonFile +
+                    " does not exist"
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=9"
+                )
+                sys.exit(9)
+            # All good
+            self.log_this.debug(
+                "All defined JSON files loaded"
+            )
+
+
+    def __print_check_summary(self):
+        self.log_this.debug(
+            "__print_check_summary was called"
+        )
+        self.log_this.info(
+            ""
+        )
+        self.log_this.info(
+            "-"*23
+        )
+        self.log_this.info(
+            "| Summary of this run |"
+        )
+        self.log_this.info(
+            "-"*23
+        )
+        self.log_this.info(
+            ""
+        )
+        self.log_this.info(
+            "Log file with details for this run is saved on: " +
+            self.log_file
+        )
+        self.log_this.info(
+            "Start of the checks on: " +
+            self.start_time_date_full.strftime('%Y/%m/%d %H:%M:%S')
+        )
+        self.stop_time_date_full = datetime.datetime.now()
+        self.log_this.info(
+            "End of the checks on: " +
+            self.stop_time_date_full.strftime('%Y/%m/%d %H:%M:%S')
+        )
+        if self.fatal_error:
+            self.log_this.error(
+                "Some tests were not passed on this host " +
+                self.hostname +
+                ", please check the output above"
+            )
+            self.log_this.debug(
+                "Going to print RED message of ERROR"
+            )
+            print("")
+            print(
+                RED +
+                "ERROR: " +
+                NOCOLOR +
+                "Not all tests passed, you cannot run EMSVM on " +
+                self.hostname +
+                " host"
+                )
+            print("")
+            self.log_this.debug(
+                "Printed RED message of ERROR"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=100"
+            )
+            sys.exit(100)
+        else:
+            self.log_this.info(
+                "All tests were passed passed on " +
+                self.hostname
+            )
+            if self.small_setup:
+                self.log_this.info(
+                    "This EMSVM setup can only manage two or less ESS units. If more units are to be managed this host is NOT supported"
+                )
+            self.log_this.info(
+                "The path " +
+                self.fs_vm +
+                " has " +
+                str(self.fs_free_excluded) +
+                " GB free excluding reserved space which is more than the required " +
+                str(self.min_gb_fs_size) +
+                " GB"
+            )
+            self.log_this.info(
+                "CPU model is " +
+                self.socket_version
+            )
+            self.log_this.info(
+                "This host has " +
+                str(self.sockets_num) +
+                " socket(s)"
+            )
+            self.log_this.info(
+                "The VM CPU cores would be " +
+                str(self.VM_cores) +
+                " core[s]"
+            )
+            self.log_this.info(
+                "The VM memory would be " +
+                str(self.VM_mem) +
+                " GB"
+            )
+            self.log_this.info(
+                "The VM HSN PCI address[es] would be " +
+                str(self.HSN_PCI_address)
+            )
+            self.log_this.info(
+                "The VM LSN PCI addresseses would be " +
+                str(self.LSN_PCI_address)
+            )
+            self.log_this.info(
+                "OS is running and matching tune profile " +
+                self.tuned_profile
+            )
+            if self.small_setup:
+                self.log_this.debug(
+                "Going to print YELLOW message of OK for small setups"
+                )
+                print("")
+                print(
+                    YELLOW +
+                    "WARNING: " +
+                    NOCOLOR +
+                    "All tests passed, you can run EMSVM on " +
+                    self.hostname +
+                    " host, for small setups of two or less EMS units only"
+                    )
+                print("")
+                self.log_this.debug(
+                    "Printed YELLOW message of OK for small setups"
+                )
+            else:
+                self.log_this.debug(
+                    "Going to print GREEN message of OK"
+                )
+                print("")
+                print(
+                    GREEN +
+                    "OK: " +
+                    NOCOLOR +
+                    "All tests passed, you can run EMSVM on " +
+                    self.hostname +
+                    " host"
+                    )
+                print("")
+                self.log_this.debug(
+                    "Printed GREEN message of OK"
+                )
+            self.log_this.debug(
+                "Going to exit with RC=0"
+            )
+            sys.exit(0)
+
+
+    def __convert_NIC_to_nodedev(self):
+        virsh_nodedev_to_detach = []
+        self.log_this.debug(
+            "Going to create a virsh nodedev list to detach for HSN and LSN"
+        )
+        for PCI_address in self.HSN_PCI_address:
+            self.log_this.debug(
+                "Going to process " +
+                str(PCI_address)
+            )
+            nodedev_PCI = "pci_" + PCI_address.replace(":", "_").lower()
+            self.log_this.debug(
+                "Converted as " +
+                str(nodedev_PCI)
+            )
+            virsh_nodedev_to_detach.append(nodedev_PCI)
+            self.log_this.debug(
+                "Appended into virsh_nodedev_to_detach now contains " +
+                str(virsh_nodedev_to_detach)
+            )
+        self.log_this.debug(
+            "Appended all HSN PCI addresses, now going to do LSN"
+        )
+        for PCI_address in self.LSN_PCI_address:
+            self.log_this.debug(
+                "Going to process " +
+                str(PCI_address)
+            )
+            nodedev_PCI = "pci_" + PCI_address.replace(":", "_").lower()
+            nodedev_PCI = nodedev_PCI.replace(".", "_")
+            self.log_this.debug(
+                "Converted as " +
+                str(nodedev_PCI)
+            )
+            virsh_nodedev_to_detach.append(nodedev_PCI)
+            self.log_this.debug(
+                "Appended into virsh_nodedev_to_detach now contains " +
+                str(virsh_nodedev_to_detach)
+            )
+        self.log_this.debug(
+            "Appended all LSN PCI addresses, we are done"
+        )
+        self.log_this.debug(
+            "Going to return " +
+            str(virsh_nodedev_to_detach)
+        )
+        return virsh_nodedev_to_detach
+
+
+    def __get_os_net_dev(self):
+        self.log_this.debug(
+            "Going to match PCI addresses of NIC with OS device names"
+        )
+        regex_pattern = r'PCI_SLOT_NAME=(?P<pci_address>[a-fA-F0-9]{4}:[a-fA-F0-9]{2}:[a-fA-F0-9]{2}[\.][0-9])'
+        OSDEVPCI = re.compile(regex_pattern)
+        netdev_ls = self.__exec_cmd("ls -1 /sys/class/net/", decode=True)
+        self.log_this.debug(
+            "Got net devices via ls: " +
+            str(netdev_ls)
+        )
+        dev_out_list = netdev_ls.split("\n")
+        dev_out_list = dev_out_list[:-1]
+        self.log_this.debug(
+            "Converted to list: " +
+            str(dev_out_list)
+        )
+        self.PCI_to_OS_name = {}
+        for dev_os_line in dev_out_list:
+            file_to_check = "/sys/class/net/" + dev_os_line + "/device/uevent"
+            if not self.__check_file_exists(file_to_check, allowDir=False):
+                self.log_this.debug(
+                    str(dev_os_line) +
+                    " does not have uvent file"
+                )
+                continue
+            self.log_this.debug(
+                "Going to match PCI and OS dev of " +
+                str(dev_os_line)
+            )
+            PCI_slot_addr = self.__exec_cmd("grep PCI_SLOT_NAME /sys/class/net/" + dev_os_line + "/device/uevent", decode=True)
+            is_PCI_SLOT = OSDEVPCI.match(PCI_slot_addr)
+            if is_PCI_SLOT:
+                PCI_address = is_PCI_SLOT.group('pci_address')
+                self.log_this.debug(
+                    "We believe that " +
+                    str(dev_os_line) +
+                    " has PCI_SLOT_NAME " +
+                    str(PCI_address)
+                )
+                self.PCI_to_OS_name[PCI_address] = dev_os_line
+                self.log_this.debug(
+                    "Added entry to PCI_to_os_dev dict"
+                )
+            else:
+                self.log_this.debug(
+                    "We do not believe that " +
+                    str(dev_os_line) +
+                    " has a valid PCI_SLOT_NAME"
+                )
+        self.log_this.debug(
+            "All PCI_SLOT_NAME processed"
+        )
+
+
+
+    def __map_IOMMU_groups_to_PCI(self):
+        self.log_this.debug(
+            "Going to map the IOMMU groups to PCI addresses"
+        )
+
+        regex_pattern = r'\/sys\/kernel\/iommu_groups\/(?P<iommu_group>[0-9]*)\/devices\/(?P<pci_address>[a-fA-F0-9]{4}:[a-fA-F0-9]{2}:[a-fA-F0-9]{2}[\.][0-9])'
+        
+        IOMMUPCI = re.compile(regex_pattern)
+        iommugroup_find = self.__exec_cmd("find /sys/kernel/iommu_groups -maxdepth 3 -type l", decode=True)
+        self.log_this.debug(
+            "Got iommu groups via find: " +
+            str(iommugroup_find)
+        )
+        iommu_out_list = iommugroup_find.split("\n")
+        iommu_out_list = iommu_out_list[:-1]
+        self.log_this.debug(
+            "Converted to list: " +
+            str(iommu_out_list)
+        )
+        self.PCI_to_IOMMU_group = {}
+        self.IOMMU_group_to_PCI = {}
+        fatalError = False
+        for iommu_group_line in iommu_out_list:
+            self.log_this.debug(
+                "Going to match PCI and IOMMU group dev of " +
+                str(iommu_group_line)
+            )
+            IOMMU_PCI_match = IOMMUPCI.match(iommu_group_line)
+            if IOMMU_PCI_match:
+                PCI_address = IOMMU_PCI_match.group('pci_address')
+                IOMMU_group = IOMMU_PCI_match.group('iommu_group')
+                self.log_this.debug(
+                    "We believe that " +
+                    str(iommu_group_line) +
+                    " has IOMMU group id " +
+                    str(IOMMU_group) +
+                    " and has PCI address " +
+                    str(PCI_address)
+                )
+                self.PCI_to_IOMMU_group[PCI_address] = IOMMU_group
+                if IOMMU_group in self.IOMMU_group_to_PCI.keys():
+                    self.IOMMU_group_to_PCI[IOMMU_group].append(PCI_address)
+                else:
+                    PCI_address_list = [PCI_address]
+                    self.IOMMU_group_to_PCI[IOMMU_group] = PCI_address_list
+
+            else:
+                self.log_this.error(
+                    "We cannot parse " +
+                    str(iommu_group_line) +
+                    " for IOMMU group and PCI address"
+                )
+                fatalError = True
+
+        self.log_this.debug(
+            "All IOMMU groups processed"
+        )
+        if fatalError:
+            self.log_this.error(
+                "There were problems checking IOMMU groups"
+            )
+            self.log_this.debug(
+                    "Going to exit with RC=47"
+                )
+            sys.exit(47)
+        else:
+            self.log_this.info(
+                "All IOMMU groups parsed successfully"
+            )
+
+
+    def __check_interfaces_in_use(self):
+        self.log_this.debug(
+            "Going to check if interfaces we pass to EMSVM"
+        )
+        ipFound = False
+        inBond = False
+        import ethtool
+        for pci_address in self.PCI_to_OS_name.keys():
+            osName = self.PCI_to_OS_name[pci_address]
+            self.log_this.debug(
+                "Going to check interface " +
+                str(osName)
+            )
+            if pci_address in self.HSN_PCI_address:
+                self.log_this.debug(
+                    "PCI address " +
+                    str(pci_address) +
+                    " is HSN device"
+                )
+            elif pci_address in self.LSN_PCI_address:
+                self.log_this.debug(
+                    "PCI address " +
+                    str(pci_address) +
+                    " is LSN device"
+                )
+
+            else:
+                self.log_this.debug(
+                    "PCI address " +
+                    str(pci_address) +
+                    " is not going to be passed to the VM"
+                )
+                continue
+            try:
+                ipAddress = ethtool.get_ipaddr(osName)
+                self.log_this.info(
+                    "Interface " +
+                    str(osName) +
+                    " has IP " +
+                    str(ipAddress)
+                )
+                ipFound = True
+            except BaseException:
+                self.log_this.debug(
+                    "Interface " +
+                    str(osName) +
+                    " has no IP address"
+                )
+
+            belongsToBond = self.__check_interface_in_bond(osName)
+            if belongsToBond:
+                self.log_this.info(
+                    "Interface " +
+                    str(osName) +
+                    " belongs to a bond/LACP"
+                )
+                inBond = True
+            else:
+                self.log_this.debug(
+                    "Interface " +
+                    str(osName) +
+                    " does not belong to a bond/LACP"
+                )
+
+        if ipFound or inBond:
+            self.log_this.error(
+                "We found IP address[es] or interface[s] belonging to a bond in one " +
+                "or more interfaces that are going to be passthrough to the VM"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=39"
+            )
+            sys.exit(39)
+        else:
+            self.log_this.info(
+                "No IP address[es] nor interfaces belonging to a bond found on the interfaces to be passthrough to the VM"
+            )
+
+        self.log_this.debug(
+            "Going to check the IOMMU groups for the interfaces that are passed to EMSVM"
+        )
+        self.__check_IOMMU_LSN()
+        self.__check_IOMMU_HSN()
+
+
+    def __check_IOMMU_HSN(self):
+        self.log_this.debug(
+            "Going to check HSN IOMMU groups"
+        )
+        HSN_list_per_slot = self.__group_HSN_PCI_slots()
+        self.log_this.debug(
+            "Got HSN grouped as " +
+            str(HSN_list_per_slot)
+        )
+        for pci_slot in HSN_list_per_slot:
+            self.log_this.debug(
+                "Going to process slot " +
+                str(pci_slot)
+            )
+            self.__check_IOMMU_HSN_slot(pci_slot)
+
+
+    def __group_HSN_PCI_slots(self):
+        self.log_this.debug(
+            "Going to create a list of lists with HSN PCI addresses " +
+            str(self.HSN_PCI_address)
+        )
+        previous_slot = ""
+        list_slots_index = -1
+        list_slots = [] 
+
+        for pci_address in self.HSN_PCI_address:
+            self.log_this.debug(
+                "Going to process " +
+                str(pci_address)
+            )
+            short_address = pci_address.split(".")[0]
+            self.log_this.debug(
+                "Going check if slot " +
+                str(short_address) +
+                " is the same as previous " +
+                str(previous_slot)
+            )
+            if short_address == previous_slot:
+                self.log_this.debug(
+                    "The slots are the same, we append to current slot"
+                )
+                list_slots[list_slots_index].append(pci_address)
+            else:
+                self.log_this.debug(
+                    "This is a different PCI slot than previous one"
+                )
+                list_slots_index +=1
+                self.log_this.debug(
+                    "Updated list index to " +
+                    str(list_slots_index)
+                )
+                list_slots.append([pci_address])
+            previous_slot = short_address
+            self.log_this.debug(
+                "Updated previous slot to " +
+                str(previous_slot)
+            )
+        self.log_this.debug(
+            "All HSN PCI addresses processed, going to return " +
+            str(list_slots)
+        )
+        return list_slots
+
+
+    def __check_IOMMU_HSN_slot(self, HSN_slot):
+        self.log_this.debug(
+            "Going to check HSN slot " +
+            str(HSN_slot)
+        )
+        IOMMU_groups_HSN = []
+        for pci_address in HSN_slot:
+            self.log_this.debug(
+                "Going to add IOMMU group " +
+                str(self.PCI_to_IOMMU_group[pci_address]) +
+                " for PCI address " +
+                str(pci_address)
+            )
+            IOMMU_groups_HSN.append(self.PCI_to_IOMMU_group[pci_address])
+        if len(IOMMU_groups_HSN) == 1:
+            self.log_this.debug(
+                "All HSN ports of this slot belong to the same IOMMU group"
+            )
+            return True
+        else:
+            self.log_this.debug(
+                "There is more than one IOMMU group for this HSN slot, we need to check further"
+            )
+        for IOMMUGroup in IOMMU_groups_HSN:
+            self.log_this.debug(
+                "Going to query IOMMU group " +
+                str(IOMMUGroup)
+            )
+            PCIDevicesInIOMMU = self.IOMMU_group_to_PCI[IOMMUGroup]
+            if len(PCIDevicesInIOMMU) == 1:
+                self.log_this.debug(
+                    "Only PCI " +
+                    str(PCIDevicesInIOMMU[0]) +
+                    " on IOMMU group " +
+                    str(IOMMUGroup)
+                )
+            else:
+                self.log_this.debug(
+                    "More than PCI device on IOMMU group " +
+                    str(IOMMUGroup)
+                )
+                for pci_address in HSN_slot:
+                    self.log_this.debug(
+                        "Going to check PCI addresses in " +
+                        str(PCIDevicesInIOMMU)
+                    )
+                    if pci_address in PCIDevicesInIOMMU:
+                        self.log_this.debug(
+                            "Found " +
+                            str(pci_address) +
+                            " in IOMMU group " +
+                            str(IOMMUGroup)
+                        )
+                        PCIDevicesInIOMMU.remove(pci_address)
+                        self.log_this.debug(
+                            "PCI address found is removed now from list"
+                        )
+                if len(PCIDevicesInIOMMU) == 0:
+                    self.log_this.debug(
+                        "All PCI address on IOMMU group " +
+                        str(IOMMUGroup) +
+                        " are HSN ports of this slot"
+                    )
+                else:
+                    self.log_this.error(
+                        "Not all PCI address on IOMMU group " +
+                        str(IOMMUGroup) +
+                        " are HSN ports of this slot, so IOMMU group contains more than this HSN card"
+                    )
+                    self.log_this.debug(
+                        "Going to exit with RC=48"
+                    )
+                    sys.exit(48)
+
+
+
+    def __check_IOMMU_LSN(self):
+        self.log_this.debug(
+            "Going to check LSN IOMMU groups"
+        )
+        IOMMU_groups_LSN = []
+        for pci_address in self.LSN_PCI_address:
+            self.log_this.debug(
+                "Going to add IOMMU group " +
+                str(self.PCI_to_IOMMU_group[pci_address]) +
+                " for PCI address " +
+                str(pci_address)
+            )
+            IOMMU_groups_LSN.append(self.PCI_to_IOMMU_group[pci_address])
+        if len(IOMMU_groups_LSN) == 1:
+            self.log_this.debug(
+                "All LSN ports belong to the same IOMMU group"
+            )
+            return True
+        else:
+            self.log_this.debug(
+                "There is more than one IOMMU group for LSN, we need to check further"
+            )
+        for IOMMUGroup in IOMMU_groups_LSN:
+            self.log_this.debug(
+                "Going to query IOMMU group " +
+                str(IOMMUGroup)
+            )
+            PCIDevicesInIOMMU = self.IOMMU_group_to_PCI[IOMMUGroup]
+            if len(PCIDevicesInIOMMU) == 1:
+                self.log_this.debug(
+                    "Only PCI " +
+                    str(PCIDevicesInIOMMU[0]) +
+                    " on IOMMU group " +
+                    str(IOMMUGroup)
+                )
+            else:
+                self.log_this.debug(
+                    "More than PCI device on IOMMU group " +
+                    str(IOMMUGroup)
+                )
+                for pci_address in self.LSN_PCI_address:
+                    self.log_this.debug(
+                        "Going to check PCI addresses in " +
+                        str(PCIDevicesInIOMMU)
+                    )
+                    if pci_address in PCIDevicesInIOMMU:
+                        self.log_this.debug(
+                            "Found " +
+                            str(pci_address) +
+                            " in IOMMU group " +
+                            str(IOMMUGroup)
+                        )
+                        PCIDevicesInIOMMU.remove(pci_address)
+                        self.log_this.debug(
+                            "PCI address found is removed now from list"
+                        )
+                if len(PCIDevicesInIOMMU) == 0:
+                    self.log_this.debug(
+                        "All PCI address on IOMMU group " +
+                        str(IOMMUGroup) +
+                        " are LSN ports"
+                    )
+                else:
+                    self.log_this.error(
+                        "Not all PCI address on IOMMU group " +
+                        str(IOMMUGroup) +
+                        " are LSN ports, so IOMMU group contains more than LSN card"
+                    )
+                    self.log_this.debug(
+                        "Going to exit with RC=48"
+                    )
+                    sys.exit(48)
+
+
+    def __check_interface_in_bond(self, osName):
+        self.log_this.debug(
+            "Going to import ethtool in bond check of interface " +
+            osName
+        )
+        import ethtool
+        self.log_this.debug(
+            "ethtool imported in bond check of interface " +
+            osName
+        )
+        interfaceFlags = ethtool.get_flags(osName)
+        self.log_this.debug(
+            "Got flags for interface " +
+            osName
+        )
+        return True if interfaceFlags & ethtool.IFF_SLAVE else False
+
+
+    def __detach_PCI_cards(self):
+        self.log_this.debug(
+            "Detach PCI cards called"
+        )
+        virsh_nodedev_to_detach = self.__convert_NIC_to_nodedev()
+        self.log_this.debug(
+            "Going to start detaching NICs"
+        )
+        for nodedev in virsh_nodedev_to_detach:
+            self.log_this.debug(
+                "Going to detach " +
+                str(nodedev)
+            )
+            try:
+                detach_out = self.__exec_cmd("virsh nodedev-dettach " + str(nodedev),decode=True)
+                self.log_this.error(
+                    "Got " +
+                    detach_out +
+                    " when detaching nodedev " +
+                    str(nodedev)
+                )
+            except BaseException:
+                self.log_this.error(
+                    "Could not detach nodedev " +
+                    str(nodedev)
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=36"
+                )
+                sys.exit(36)
+
+
+    def startVM(self):
+        self.log_this.debug(
+            "Start VM has been called"
+        )
+        self.__checkVMFile()
+        while True:
+            # Lets give ONE warning to user about network devices
+            # We should had pass a check before hand so PCI variables are filled
+            self.log_this.info("")
+            self.log_this.info(
+                "You have requested to start the EMSVM in this host"
+            )
+            self.log_this.info(
+                "The following PCI devices are going to be assigned to the VM " +
+                "and are not going to be accessible from the host"
+            )
+            self.log_this.info(
+                "If you are using any of them to connect to the host, you are going to lose connectivity to this host"
+            )
+            self.log_this.info(
+                "Please be sure that you are not using any of the following devices before continuing the start up of the EMSVM"
+            )
+            self.__get_os_net_dev()
+            self.__map_IOMMU_groups_to_PCI() # Must be after get_os_net_dev
+            for PCI_addr in self.HSN_PCI_address:
+                self.log_this.info(
+                    "PCI address: '" +
+                    str(PCI_addr) +
+                    "' Description: '" +
+                    self.lspci_dict[PCI_addr] +
+                    "'"
+                )
+            for PCI_addr in self.LSN_PCI_address:
+                self.log_this.info(
+                    "OS device name: '" +
+                    self.PCI_to_OS_name[PCI_addr] +
+                    "' PCI address: '" +
+                    str(PCI_addr) +
+                    "' Description: '" +
+                    self.lspci_dict[PCI_addr] +
+                    "'"
+                )
+            self.__check_interfaces_in_use()
+            try:
+                self.log_this.info("Do you want to continue with the start EMSVM? (y/n): ")
+                start_VM_user_confirm = input()
+            except KeyboardInterrupt:
+                self.log_this.info(
+                    "User cancelled start EMSVM"
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=33"
+                )
+                sys.exit(33)
+            if start_VM_user_confirm.lower() == 'y':
+                self.log_this.debug(
+                    "User accepted to start EMSVM"
+                )
+                break
+            elif start_VM_user_confirm.lower() == 'n':
+                self.log_this.info(
+                    "User cancelled start EMSVM"
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=33"
+                )
+                sys.exit(33)
+            else:
+                self.log_this.warning(
+                    "We do not understand your input '" +
+                    str(start_VM_user_confirm) +
+                    "', we ask again."
+                )
+
+        # We are out of the loop
+
+        # Check is called before hand from main
+        # self.checkVM(startVM=True)
+        # We have the domain created from above
+        # self.__detach_PCI_cards()
+        self.__ask_host_license()
+        self.log_this.info(
+            "It can take several minutes to start the VM, please wait ..."
+        )
+        try:
+            self.EMSVM_dom = self.QEMU_conn.lookupByName(self.KVM_VM_name)
+            self.EMSVM_dom.create()
+            self.log_this.debug(
+                "KVM VM domain " +
+                self.KVM_VM_name +
+                " is now started"
+            )
+        except BaseException:
+            self.log_this.error(
+                "Unexpected issue while KVM VM start"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=31"
+            )
+            sys.exit(31)
+        self.log_this.info(
+            "EMSVM is started now ..."
+        )
+
+
+    def checkVM(self, startVM=False):
+        self.log_this.debug(
+            "Check VM has been called"
+        )
+        self.__connect_local_QEMU()
+        self.log_this.debug(
+            "Going to check if VM " +
+            self.KVM_VM_name +
+            " exists and its status"
+        )
+        KVM_domains = self.QEMU_conn.listAllDomains()
+
+        if len(KVM_domains) > 1:
+            self.log_this.error(
+                "There are more than one VM in this system"
+            )
+            self.log_this.debug(
+                    "Going to exit with RC=27"
+                )
+            sys.exit(27)
+
+        EMSVM_found = False
+        for domain in KVM_domains:
+            self.log_this.debug(
+                "Going to get VM name for domain " +
+                str(domain)
+            )
+            VM_name = domain.name()
+            self.log_this.debug(
+                "Got VM name as '" +
+                VM_name +
+                "'"
+            )
+            if VM_name == self.KVM_VM_name:
+                EMSVM_found = True
+                self.log_this.debug(
+                    "Found EMSVM domain"
+                )
+                break
+
+        if EMSVM_found:
+            # stderr when not found
+            KVM_domain = self.QEMU_conn.lookupByName(self.KVM_VM_name)
+            self.log_this.info(
+                self.KVM_VM_name +
+                " KVM domain exists"
+            )
+            is_already_active = KVM_domain.isActive()
+            if is_already_active:
+                self.log_this.info(
+                    "KVM VM domain " +
+                    self.KVM_VM_name +
+                    " is already active"
+                )
+                if startVM:
+                    self.log_this.info(
+                        "The EMSVM is already active, cannot start it again"
+                    )
+                    self.log_this.debug(
+                        "Going to exit with RC=1"
+                    )
+                    sys.exit(1)
+                else:
+                    return True
+            else:
+                if startVM:
+                    self.log_this.info(
+                    "KVM VM domain " +
+                    self.KVM_VM_name +
+                    " is not active, we are going to start it"
+                    )
+                    return True
+                else:
+                    self.log_this.warning(
+                    "KVM VM domain " +
+                    self.KVM_VM_name +
+                    " is not active"
+                    )
+                return False
+        else:
+            self.log_this.debug(
+                "Our KVM domain does not exist, does any other exist?"
+            )
+            if not startVM:
+                self.log_this.error(
+                    "We cannot connect or check of " +
+                    self.KVM_VM_name +
+                    " because it is not created"
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=28"
+                )
+                sys.exit(28)
+
+            if len(KVM_domains) == 0:
+                self.log_this.debug(
+                    "No KVM domains detected"
+                )
+            else:
+                self.log_this.error(
+                    "Other KVM VM detected, we stop here"
+                )
+                self.log_this.debug(
+                    "Going to exith with RC=27"
+                )
+                sys.exit(27)
+            if startVM:
+                # we still here we create it
+                self.log_this.warning(
+                    self.KVM_VM_name +
+                    " KVM domain does not exist. Going to create it"
+                )
+                self.__create_KVM_VM()
+
+
+    def checkHost(self, startVM=False):
+        if startVM:
+            self.log_this.debug(
+            "Check VM has been called in to start VM"
+        )
+        else:
+                self.log_this.debug(
+            "Check VM has been called to check only"
+        )
+
+        # Net checks
+        self.__check_HSN()
+        self.__check_quad_port_Ethernet()
+
+        # HW checks
+        self.__check_cores()
+        self.__check_memory()
+
+        # OS checks
+        self.__tuned_adm_check()
+        self.__check_fs()
+        self.__connect_local_QEMU(check_only=True)
+        self.__check_selinux()
+        self.__check_KVM_exec()
+
+        # Summary
+        if startVM:
+            if self.fatal_error:
+                self.log_this.error(
+                    "Although you requested to start the EMSVM, not all tests passed"
+                )
+                self.__print_check_summary()
+            else:
+                self.log_this.info(
+                    "All tests passed, starting EMSVM"
+                )
+                self.log_this.debug(
+                    "Going to return True to startVM"
+                )
+                return True
+        else:
+            self.log_this.debug(
+                "Going to show summary of this host check"
+            )
+            self.__print_check_summary()
+
+
+    def connectVM(self):
+        self.log_this.debug(
+                "Going to connect to EMS console"
+            )
+        try:
+            os.system("sudo virsh console EMSVM --force")
+        except BaseException:
+            self.log_this.error(
+                "Could not connect to EMSVM with virsh console"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=40"
+            )
+            sys.exit(40)
+        self.log_this.info(
+            "Console to EMSVM disconnected"
+        )
+        self.log_this.debug(
+                "Going to exit with RC=0"
+            )
+        sys.exit(0)
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(
+        prog=PROGRAM_NAME,
+        description='EMSVM host check and run'
+    )
+
+    subcommand = parser.add_mutually_exclusive_group(required=True)
+
+    subcommand.add_argument(
+        '--check-host',
+        action='store_true',
+        dest='check_host',
+        help='Assess the readiness of the host to run EMSVM',
+        default=False)
+
+    subcommand.add_argument(
+        '--connect-EMS',
+        action='store_true',
+        dest='connect_ems',
+        help='Connect to the EMSVM console information',
+        default=False)
+
+    subcommand.add_argument(
+        '--start-EMS',
+        action='store_true',
+        dest='start_ems',
+        help='Start EMSVM in this host',
+        default=False)
+
+    subcommand.add_argument(
+        '--check-EMS',
+        action='store_true',
+        dest='check_ems',
+        help='Check if EMSVM is UP',
+        default=False)
+
+    parser.add_argument(
+        '-d',
+        '--debug',
+        required=False,
+        action='store_true',
+        dest='verbose',
+        help='Print verbose messages also to shell',
+        default=False
+    )
+
+    parser.add_argument(
+        '-v',
+        '--version',
+        action='version',
+        version= PROGRAM_NAME + ' version ' + VERSION
+    )
+
+    args = parser.parse_args()
+
+    if args.check_host:
+        subcommand = "check_host"
+    elif args.start_ems:
+        subcommand = "start_EMS"
+    elif args.check_ems:
+        subcommand = "check_EMS"
+    elif args.connect_ems:
+        subcommand = "connect_EMS"
+    else:
+        # Should not hit this
+        sys.exit(RED + "QUIT: " + NOCOLOR + "Unexpected error parsing arguments\n")
+
+    return subcommand, args.verbose
+
+
+def main():
+    subcommand, verbose = parse_arguments()
+    this_host = EMSVM(subcommand, verbose)
+    if subcommand == "start_EMS":
+        host_check_passed = this_host.checkHost(startVM=True)
+        VM_check_passed = this_host.checkVM(startVM=True)
+        if host_check_passed:
+            this_host.startVM()
+    elif subcommand == "connect_EMS":
+        isUP = this_host.checkVM()
+        if isUP:
+            this_host.connectVM()
+        else:
+            this_host.log_this.error(
+                "Cannot connect to EMSVM as it is not up"
+            )
+            sys.exit(1)
+    elif subcommand == "check_EMS":
+        isUp = this_host.checkVM()
+        if not isUp:
+            sys.exit(1)
+    elif subcommand == "check_host":
+        this_host.checkHost()
+
+
+if __name__ == '__main__':
+    main()

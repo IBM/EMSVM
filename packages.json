@@ -1,0 +1,20 @@
+{
+    "json_version": "1.0",
+    "dmidecode": 0,
+    "pciutils": 0,
+    "numactl-libs": 0,
+    "tuned": 0,
+    "virt-manager": 0,
+    "libvirt-daemon": 0,
+    "libvirt-client": 0,
+    "libvirt": 0,
+    "libguestfs-tools": 0,
+    "virt-install": 0,
+    "qemu-img": 0,
+    "python3-libvirt": 0,
+    "python3-requests": 0,
+    "python3-ethtool": 0,
+    "lsscsi": 0,
+    "gpfs.base": 1,
+    "coreutils": 0
+}
