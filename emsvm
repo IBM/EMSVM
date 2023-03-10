@@ -20,7 +20,7 @@ import mimetypes
 
 PROGRAM_NAME = "emsvm"
 # Remember to update the VERSION file too
-VERSION = "1.0"
+VERSION = "1.1"
 
 # Colorful constants
 RED = '\033[91m'
@@ -85,6 +85,7 @@ class EMSVM(object):
         RC 46 = libvirtd is not active
         RC 47 = Cannot parse IOMMU groups and PCI addresses
         RC 48 = HSN or LSN IOMMU groups are not compliant with requirements
+        RC 49 = No user confirmation for destrucive deletion of KVM domain
         RC 100 = Tests completed and host does not qualify to run EMSVM
    """
 
@@ -1723,6 +1724,21 @@ class EMSVM(object):
                 "Going to exit with RC=37"
             )
             sys.exit(37)
+
+
+    def __dump_EMSVM_XML(self):
+        # This is called due domain exists, lets dump the XML on debug output
+        self.log_this.debug(
+            "We are going to dump host configured KVM domain XML"
+        )
+        dump_XML_cmd = "virsh dumpxml " + self.KVM_VM_name
+        dumpXMLout = self.__exec_cmd(dump_XML_cmd, decode=True).strip("\n")
+        self.log_this.debug(
+            dumpXMLout
+        )
+        self.log_this.debug(
+            "End of dump host configured KVM domain XML"
+        )
 
 
     def __create_KVM_VM(self):
@@ -3590,6 +3606,8 @@ class EMSVM(object):
                 self.KVM_VM_name +
                 " KVM domain exists"
             )
+            # We have the domain lets dump the XML into debug
+            self.__dump_EMSVM_XML()
             is_already_active = KVM_domain.isActive()
             if is_already_active:
                 self.log_this.info(
@@ -3728,6 +3746,79 @@ class EMSVM(object):
         sys.exit(0)
 
 
+    def deleteVM(self, deleteStorage):
+        self.log_this.debug(
+            "delteVM is called with deleteStorage=" +
+            str(deleteStorage)
+        )
+        if deleteStorage:
+            self.log_this.debug(
+                "This is a destructive operation, need to get user confirmation"
+            )
+            while True:
+                try:
+                    self.log_this.info("You should run this only if you been instructed by IBM support.")
+                    self.log_this.info("This is a destructive operation, all data in the VM will be lost. Are you sure? (y/n): ")
+                    destroy_VM_data = input()
+                except KeyboardInterrupt:
+                    self.log_this.info(
+                        "User cancelled delete VM question"
+                    )
+                    self.log_this.debug(
+                        "Going to exit with RC=49"
+                    )
+                    sys.exit(49)
+                if destroy_VM_data.lower() == 'y':
+                    self.log_this.debug(
+                        "User certifies that it wants to lose the VM data"
+                    )
+                    break
+                elif destroy_VM_data.lower() == 'n':
+                    self.log_this.info(
+                        "User does not certify that it wants to lose the VM data"
+                    )
+                    self.log_this.debug(
+                        "Going to exit with RC=49"
+                    )
+                    sys.exit(49)
+                else:
+                    self.log_this.warning(
+                        "We do not understand your input '" +
+                        str(destroy_VM_data) +
+                        "', we ask again."
+                    )
+            # We are out of the loop, to delete the VM and its data ... here we go
+            self.log_this.info(
+                "Going to undefine and delete the data of KVM domain " +
+                self.KVM_VM_name
+            )
+            undefine_delete_cmd = "virsh undefine --domain " + self.KVM_VM_name + " --remove-all-storage"
+            undefineDeleteOutput = self.__exec_cmd(undefine_cmd, decode=True).strip("\n")
+            self.log_this.debug(undefineDeleteOutput)
+            self.log_this.info(
+                "KVM VM is undefined and all VM data was deleted. You need to start over as initial setup"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=0"
+            )
+            sys.exit(0)
+        else:
+            self.log_this.info(
+                "Going to undefine KVM domain " +
+                self.KVM_VM_name
+            )
+            undefine_cmd = "virsh undefine --domain " + self.KVM_VM_name
+            undefineOutput = self.__exec_cmd(undefine_cmd, decode=True).strip("\n")
+            self.log_this.debug(undefineOutput)
+            self.log_this.info(
+                "KVM VM is undefined, no data was modified or lost. You need to start it again with --start-EMS"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=0"
+            )
+            sys.exit(0)
+
+
 def parse_arguments():
     parser = argparse.ArgumentParser(
         prog=PROGRAM_NAME,
@@ -3764,6 +3855,22 @@ def parse_arguments():
         help='Check if EMSVM is UP',
         default=False)
 
+    subcommand.add_argument(
+        '--undefine-EMS',
+        action='store_true',
+        dest='recover_ems',
+        help="Deletes KVM domain definition from the system, no data of EMSVM is changed or lost",
+        default=False
+    )
+
+    subcommand.add_argument(
+        '--delete-EMS',
+        action='store_true',
+        dest='delete_ems',
+        help=argparse.SUPPRESS,
+        default=False
+    )
+
     parser.add_argument(
         '-d',
         '--debug',
@@ -3791,6 +3898,10 @@ def parse_arguments():
         subcommand = "check_EMS"
     elif args.connect_ems:
         subcommand = "connect_EMS"
+    elif args.undefine_ems:
+        subcommand = "undefine_EMS"
+    elif args.delete_ems:
+        subcommand = "delete_EMS"
     else:
         # Should not hit this
         sys.exit(RED + "QUIT: " + NOCOLOR + "Unexpected error parsing arguments\n")
@@ -3807,8 +3918,8 @@ def main():
         if host_check_passed:
             this_host.startVM()
     elif subcommand == "connect_EMS":
-        isUP = this_host.checkVM()
-        if isUP:
+        isUp = this_host.checkVM()
+        if isUp:
             this_host.connectVM()
         else:
             this_host.log_this.error(
@@ -3821,6 +3932,15 @@ def main():
             sys.exit(1)
     elif subcommand == "check_host":
         this_host.checkHost()
+    elif subcommand == "delete_EMS" or subcommand == "undefine_EMS":
+        isUp = this_host.checkVM()
+        if isUp:
+            sys.exit("Cannot delete EMS while it is UP")
+        else:
+            if subcommand == "delete_EMS":
+                this_host.deleteVM(deleteStorage=True)
+            elif subcommand == "undefine_EMS":
+                this_host.deleteVM(deleteStorage=False)
 
 
 if __name__ == '__main__':

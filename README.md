@@ -79,19 +79,19 @@ The 0000:45:00 would be passed to the VM (eth0 to eth3 on this host)
 **emsvm output**
 ```
 # ./emsvm -h
-usage: EMS VM [-h] (--check-host | --connect-EMS | --start-EMS | --check-EMS)
-              [-d] [-v]
+usage: emsvm [-h] (--check-host | --connect-EMS | --start-EMS | --check-EMS | --undefine-EMS) [-d] [-v]
 
-EMS VM host check and VM run
+EMSVM host check and run
 
-optional arguments:
-  -h, --help     show this help message and exit
-  --check-host   Assess the readiness of the host to run EMS VM
-  --connect-EMS  Connect to the EMS VM console
-  --start-EMS    Start EMS VM in this host
-  --check-EMS    Check if EMS VM is UP
-  -d, --debug    Print verbose messages also to shell
-  -v, --version  show program's version number and exit
+options:
+  -h, --help      show this help message and exit
+  --check-host    Assess the readiness of the host to run EMSVM
+  --connect-EMS   Connect to the EMSVM console information
+  --start-EMS     Start EMSVM in this host
+  --check-EMS     Check if EMSVM is UP
+  --undefine-EMS  Deletes KVM domain definition from the system, no data of EMSVM is changed or lost
+  -d, --debug     Print verbose messages also to shell
+  -v, --version   show program's version number and exit
 
 ```
 To check if the customer host passes the acceptance criteria run with ''--check-host'' parameter
