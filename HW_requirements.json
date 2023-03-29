@@ -1,5 +1,5 @@
 {
-    "json_version": "1.0",
+    "json_version": "1.1",
     "MIN_CORES_SMALL": 16,
     "MIN_CORES": 32,
     "HOST_OS_CORES_RESERVED": 2,
@@ -9,6 +9,7 @@
     "MIN_GB_RAM": 247,
     "MIN_GB_FREE_FS": 575,
     "FS_PATH": "/emsvm",
+    "FS_PATH2": "/essvm", 
     "VM_DISK_FILE": "EMSVM.qcow2",
     "TUNED_PROFILE": "virtual-host"
   }

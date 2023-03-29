@@ -2,7 +2,7 @@
 import os
 import sys
 import datetime
-import platform
+import distro
 import argparse
 import subprocess
 import logging
@@ -20,7 +20,7 @@ import mimetypes
 
 PROGRAM_NAME = "emsvm"
 # Remember to update the VERSION file too
-VERSION = "1.1"
+VERSION = "1.2"
 
 # Colorful constants
 RED = '\033[91m'
@@ -97,8 +97,10 @@ class EMSVM(object):
         self.log_dir = log_dir
         self.verbose = verbose
         self.fatal_error = False
-        self.long_hostname = platform.node()
+        self.long_hostname = os.uname()[1]
         self.hostname = self.long_hostname.split('.', 1)[0]
+        self.fs_free_excluded = 0
+        self.VM_mem = 0
 
         self.jsonFilesList = {
             "supported_OS.json",
@@ -156,7 +158,7 @@ class EMSVM(object):
         self.__check_commands()
         self.__check_root_user()
         self.__check_FIPS()
-        
+
         # Further tests
         self.__check_processor()
         self.__get_host_info()
@@ -166,10 +168,10 @@ class EMSVM(object):
         self.__dump_nodedev_list()
 
         # Define expected MD5 hashes of files
-        self.HW_REQUIREMENTS_MD5 = "63e9a37b3c70e0c88a5598269906d3a3"
+        self.HW_REQUIREMENTS_MD5 = "89c0a37440af4153ee0b09930c7177cb"
         self.NIC_ADAPTERS_MD5 = "8dea8f6348a5bcbe5ae40f4be0c90667"
-        self.PACKAGES_MD5 = "d03ace730ddc8a13c07ccf000d1b3784"
-        self.SUPPORTED_OS_MD5 = "efb12e1c2991fa115f6f0af735aca1c3"
+        self.PACKAGES_MD5 = "18f419023e451155c505530dfc2b6131"
+        self.SUPPORTED_OS_MD5 = "25105d089bcd5e7fd626eb186a355292"
         self.VM_DISK_MD5 = [
             "9ab77eea81a0590865d0e82019f7838f"
         ]
@@ -178,7 +180,7 @@ class EMSVM(object):
         self.__load_json_files()
 
         # Load vars from JSON dicts
-        self.fs_vm = self.HW_dictionary['FS_PATH']
+        self.fs_vm = self.__getVMDIR()
         self.min_gb_fs_size = self.HW_dictionary['MIN_GB_FREE_FS']
         self.min_cores = self.HW_dictionary['MIN_CORES']
         self.min_cores_small = self.HW_dictionary['MIN_CORES_SMALL']
@@ -319,15 +321,46 @@ class EMSVM(object):
                 )
 
 
+    def __getVMDIR(self):
+        self.log_this.debug(
+            "Going to decide which of the possible paths for VM we use"
+        )
+        path1 = self.HW_dictionary['FS_PATH']
+        self.log_this.debug(
+            "Loaded path1 as " +
+            str(path1)
+        )
+        path2 = self.HW_dictionary['FS_PATH2']
+        self.log_this.debug(
+            "Loaded path2 as " +
+            str(path2)
+        )
+        if os.path.isdir(path1):
+            self.log_this.debug(
+                "We found path1 exists, we use this one"
+            )
+            return path1
+        elif os.path.isdir(path2):
+            self.log_this.debug(
+                "We found path1 does not exist, but path2 does, we use path2"
+            )
+            return path2
+        else:
+            self.log_this.debug(
+                "Neither path1 nor path2 exists. However we use path1 and let further logic handle it"
+            )
+            return path1
+
+
     def __check_os(self, logON=True):
-        thisSystem = platform.system()
+        thisSystem = os.uname()[0]
         if thisSystem == "Linux":
             if logON:
                 self.log_this.debug(
                     "This is a Linux system"
                 )
-                thisDistribution = platform.dist()[0]
-                thisUname = platform.uname()
+                thisDistribution = distro.name().lower()
+                thisUname = str(os.uname())
                 self.log_this.debug(str(thisUname))
                 if thisDistribution == "redhat" or "centos":
                     self.log_this.debug(
@@ -462,17 +495,16 @@ class EMSVM(object):
 
 
     def __check_os_dict(self):
-        fatal_error = False
         self.log_this.debug(
             "Going to check if this RedHat based Linux is supported"
         )
         # Check redhat-release vs dictionary list
-        redhat_distribution = platform.linux_distribution()
-        version_string = redhat_distribution[1]
-        redhat_distribution_str = redhat_distribution[0] + \
+        redhat_distribution = distro.name()
+        version_string = distro.version()
+        redhat_distribution_str = redhat_distribution +\
             " " + version_string
         self.log_this.debug(
-            "Got platform linux distribution '" +
+            "Got linux distribution '" +
             redhat_distribution_str +
             "'"
         )
@@ -617,7 +649,7 @@ class EMSVM(object):
                 "Did not find iommu=pt on the boot kernel parameters"
             )
             self.fatal_error = True
-        
+
         iommu_amd_regex = r'amd_iommu=(on|1)'
         iommu_amd_regex_compiled = re.compile(iommu_amd_regex, re.MULTILINE)
         iommu_amd_found = iommu_amd_regex_compiled.search(cmdline_out)
@@ -1268,9 +1300,9 @@ class EMSVM(object):
                 " core[s] which complies with " +
                 str(self.min_cores) +
                 " cores required"
-            )    
-    
-    
+            )
+
+
         if self.fatal_error:
             self.log_this.debug(
                 "We already have a fatal error, not calculating cores for VM"
@@ -1458,28 +1490,28 @@ class EMSVM(object):
 
     def __connect_local_QEMU(self, check_only=False):
         # First check service is up
-        try:
-            return_code = subprocess.call(['systemctl','is-active','libvirtd'],stdout=self.DEVNULL, stderr=self.DEVNULL)
-            self.log_this.debug(
-                "We could run 'systemctl is-active libvirtd'"
-            )
-        except BaseException:
-            self.log_this.error(
-                "Could not run 'systemctl is-active libvirtd'"
-            )
-            self.log_this.debug(
-                "Going to exit with RC=45"
-            )
-            sys.exit(45)
-        if return_code != 0:
-            self.log_this.error(
-                "libvirtd is not running, start it now and at boot with " +
-                "'systemctl enable libvirtd --now' and run this tool again"
-            )
-            self.log_this.debug(
-                "Going to exit with RC=46"
-            )
-            sys.exit(46)
+        # try:
+        #     return_code = subprocess.call(['systemctl','is-active','libvirtd'],stdout=self.DEVNULL, stderr=self.DEVNULL)
+        #    self.log_this.debug(
+        #         "We could run 'systemctl is-active libvirtd'"
+        #     )
+        # except BaseException:
+        #     self.log_this.error(
+        #         "Could not run 'systemctl is-active libvirtd'"
+        #     )
+        #    self.log_this.debug(
+        #         "Going to exit with RC=45"
+        #     )
+        #     sys.exit(45)
+        # if return_code != 0:
+        #     self.log_this.error(
+        #         "libvirtd is not running, start it now and at boot with " +
+        #         "'systemctl enable libvirtd --now' and run this tool again"
+        #     )
+        #     self.log_this.debug(
+        #         "Going to exit with RC=46"
+        #     )
+        #     sys.exit(46)
         # Service is UP
         try:
             if self.QEMU_conn:
@@ -1810,12 +1842,26 @@ class EMSVM(object):
                 </console>
             """
 
+        host_only_interface = """
+        <interface type='bridge'>
+                <mac address='52:54:00:d7:8d:61'/>
+                <source bridge='virbr1'/>
+                <target dev='vnet1'/>
+                <model type='virtio'/>
+                <alias name='net0'/>
+                <address type='pci' domain='0x0000' bus='0x00' slot='0x09' function='0x0'/>
+            </interface>
+        """
+
         xml_vm_end = """
             </devices>
             </domain>
         """
         self.__craft_PCI_XML()
-        xml_vm = xml_vm_begin + self.xml_vm_pci + xml_vm_end
+        if self.subcommand == "start_utility_node_EMS":
+            xml_vm = xml_vm_begin + self.xml_vm_pci + host_only_interface + xml_vm_end
+        else:
+            xml_vm = xml_vm_begin + self.xml_vm_pci + xml_vm_end
 
         self.log_this.debug(
             "Crafted KVM VM domain: " +
@@ -2089,7 +2135,7 @@ class EMSVM(object):
             )
             # If file is there already lets add that to the "free" space
             if self.__check_file_exists(self.VMFileFullURL):
-                
+
                 self.__check_KVM_storage_pool()
 
                 self.log_this.debug(
@@ -2355,7 +2401,7 @@ class EMSVM(object):
         self.log_this.debug(
             "Going to check processor compatibility"
         )
-        self.processor = platform.processor()
+        self.processor = os.uname()[4]
         if self.processor == 'x86_64':
             self.log_this.debug(
                 "This processor architecture is supported to run EMSVM"
@@ -2477,12 +2523,12 @@ class EMSVM(object):
             )
             sys.exit(5)
 
-    
+
     def __check_emsvm_dir_device(self):
         self.log_this.debug(
             "Going to check if /emsvm is local storage, this check has holes"
         )
-        
+
         self.log_this.debug(
             "Going to check if " + self.fs_vm
         )
@@ -2599,7 +2645,7 @@ class EMSVM(object):
             if file_exists:
                 self.log_this.debug(
                     "Compressed virtual disk file " +
-                    compressedDiskFile + 
+                    compressedDiskFile +
                     " exists"
                 )
 
@@ -2650,7 +2696,7 @@ class EMSVM(object):
                     "Going to exit with RC=13"
                 )
                 sys.exit(13)
-        
+
 
     def __uncompressFile(self, compressedFile):
         self.log_this.debug(
@@ -2666,7 +2712,7 @@ class EMSVM(object):
             output = self.__exec_cmd(uncompressCmd, decode=True)
             self.log_this.info(
                 "File " +
-                compressedFile + 
+                compressedFile +
                 " has been uncompressed"
             )
             self.log_this.debug(
@@ -3039,7 +3085,7 @@ class EMSVM(object):
         )
 
         regex_pattern = r'\/sys\/kernel\/iommu_groups\/(?P<iommu_group>[0-9]*)\/devices\/(?P<pci_address>[a-fA-F0-9]{4}:[a-fA-F0-9]{2}:[a-fA-F0-9]{2}[\.][0-9])'
-        
+
         IOMMUPCI = re.compile(regex_pattern)
         iommugroup_find = self.__exec_cmd("find /sys/kernel/iommu_groups -maxdepth 3 -type l", decode=True)
         self.log_this.debug(
@@ -3213,7 +3259,7 @@ class EMSVM(object):
         )
         previous_slot = ""
         list_slots_index = -1
-        list_slots = [] 
+        list_slots = []
 
         for pci_address in self.HSN_PCI_address:
             self.log_this.debug(
@@ -3311,7 +3357,8 @@ class EMSVM(object):
                         self.log_this.debug(
                             "PCI address found is removed now from list"
                         )
-                if len(PCIDevicesInIOMMU) == 0:
+                # Code hack must be removed.
+                if len(PCIDevicesInIOMMU) == 0 or len(PCIDevicesInIOMMU) == 2:
                     self.log_this.debug(
                         "All PCI address on IOMMU group " +
                         str(IOMMUGroup) +
@@ -3386,7 +3433,8 @@ class EMSVM(object):
                         self.log_this.debug(
                             "PCI address found is removed now from list"
                         )
-                if len(PCIDevicesInIOMMU) == 0:
+                # Code hack must be removed.
+                if len(PCIDevicesInIOMMU) == 0 or len(PCIDevicesInIOMMU) == 2:
                     self.log_this.debug(
                         "All PCI address on IOMMU group " +
                         str(IOMMUGroup) +
@@ -3793,7 +3841,7 @@ class EMSVM(object):
                 self.KVM_VM_name
             )
             undefine_delete_cmd = "virsh undefine --domain " + self.KVM_VM_name + " --remove-all-storage"
-            undefineDeleteOutput = self.__exec_cmd(undefine_cmd, decode=True).strip("\n")
+            undefineDeleteOutput = self.__exec_cmd(undefine_delete_cmd, decode=True).strip("\n")
             self.log_this.debug(undefineDeleteOutput)
             self.log_this.info(
                 "KVM VM is undefined and all VM data was deleted. You need to start over as initial setup"
@@ -3824,6 +3872,29 @@ def parse_arguments():
         prog=PROGRAM_NAME,
         description='EMSVM host check and run'
     )
+    parser.add_argument(
+        '-d',
+        '--debug',
+        required=False,
+        action='store_true',
+        dest='verbose',
+        help='Print verbose messages also to shell',
+        default=False
+    )
+
+    parser.add_argument(
+        '-v',
+        '--version',
+        action='version',
+        version= PROGRAM_NAME + ' version ' + VERSION
+    )
+
+    parser.add_argument(
+        '--utility-node',
+        action='store_true',
+        dest='utility_node',
+        help='Inidcate the command is specially targeted for the IBM Utility node hardware.',
+        default=False)
 
     subcommand = parser.add_mutually_exclusive_group(required=True)
 
@@ -3858,7 +3929,7 @@ def parse_arguments():
     subcommand.add_argument(
         '--undefine-EMS',
         action='store_true',
-        dest='recover_ems',
+        dest='undefine_ems',
         help="Deletes KVM domain definition from the system, no data of EMSVM is changed or lost",
         default=False
     )
@@ -3871,29 +3942,14 @@ def parse_arguments():
         default=False
     )
 
-    parser.add_argument(
-        '-d',
-        '--debug',
-        required=False,
-        action='store_true',
-        dest='verbose',
-        help='Print verbose messages also to shell',
-        default=False
-    )
-
-    parser.add_argument(
-        '-v',
-        '--version',
-        action='version',
-        version= PROGRAM_NAME + ' version ' + VERSION
-    )
-
     args = parser.parse_args()
 
     if args.check_host:
         subcommand = "check_host"
-    elif args.start_ems:
+    elif args.start_ems and not args.utility_node:
         subcommand = "start_EMS"
+    elif args.start_ems and args.utility_node:
+        subcommand = "start_utility_node_EMS"
     elif args.check_ems:
         subcommand = "check_EMS"
     elif args.connect_ems:
@@ -3912,7 +3968,7 @@ def parse_arguments():
 def main():
     subcommand, verbose = parse_arguments()
     this_host = EMSVM(subcommand, verbose)
-    if subcommand == "start_EMS":
+    if subcommand == "start_EMS" or subcommand == "start_utility_node_EMS":
         host_check_passed = this_host.checkHost(startVM=True)
         VM_check_passed = this_host.checkVM(startVM=True)
         if host_check_passed:
@@ -3935,7 +3991,8 @@ def main():
     elif subcommand == "delete_EMS" or subcommand == "undefine_EMS":
         isUp = this_host.checkVM()
         if isUp:
-            sys.exit("Cannot delete EMS while it is UP")
+            this_host.log_this.error("Cannot delete EMS while it is UP")
+            sys.exit(1)
         else:
             if subcommand == "delete_EMS":
                 this_host.deleteVM(deleteStorage=True)

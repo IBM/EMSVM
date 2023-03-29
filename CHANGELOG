@@ -3,3 +3,8 @@
 - 1.1
     - Added KVM XML domain dump into debug output
     - Extend KVM domain lifecycle options
+- 1.2
+    - Moved from platform to distro to support Python 3.8+
+    - RHEL 9 support on host
+    - Allow /essvm and /emsvm
+    - Fix domian lifecycle options introduced on 1.1

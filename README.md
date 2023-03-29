@@ -18,7 +18,7 @@ A small setup is defined by an EMS that manages no more than two ESS building bl
  - /emsvm must be mounted on a local filesystem on a local device (not: iSCSI, FC, NFS, Spectrum Scale, ...)
  - One quad port Ethernet card for Low Speed Network (LSN), with all ports identical
  - The LSN card must belong to its own IOMMU group, preferrible each port on its own IOMMU group
- - RedHat Enterprise Linux 8.6 or 8.7 running in the host with a valid subscription
+ - RedHat Enterprise Linux (8.6, 8.7, 9.0, 9.1) running in the host with a valid subscription
  - SELinux disabled on host
  - Host fully compliant with tuned virtual-host profile
  - No other VM[s] running in the host
@@ -50,7 +50,7 @@ A small setup is defined by an EMS that manages no more than two ESS building bl
 
 **PREREQUISITES of this tool:** Before running this tool you **must** install the software prerequisites. Those are:
 - Python 3.6+
-- Installed RPM packages: dmidecode, pciutils, numactl-libs, tuned, virt-manager, libvirt-daemon, libvirt-client, libvirt, libguestfs-tools, virt-install, qemu-img, python3-libvirt, python3-requests, python3-netifaces, python3-ethtool, xz, xz-libs, lsscsi, coreutils
+- Installed RPM packages: dmidecode, pciutils, numactl-libs, tuned, virt-manager, libvirt-daemon, libvirt-client, libvirt, libguestfs-tools, virt-install, qemu-img, python3-distro, python3-libvirt, python3-requests, python3-netifaces, python3-ethtool, xz, xz-libs, lsscsi, coreutils
 - FIPS node not allowed in the host
 
 **Other information**

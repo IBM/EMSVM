@@ -1,5 +1,5 @@
 {
-    "json_version": "1.0",
+    "json_version": "1.1",
     "Red Hat Enterprise Linux 8.0": "NOK",
     "Red Hat Enterprise Linux 8.1": "NOK",
     "Red Hat Enterprise Linux 8.2": "NOK",
@@ -9,5 +9,7 @@
     "Red Hat Enterprise Linux 8.6": "OK",
     "Red Hat Enterprise Linux 8.7": "OK",
     "Red Hat Enterprise Linux 8.8": "NOK",
-    "Red Hat Enterprise Linux 8.9": "NOK"
+    "Red Hat Enterprise Linux 8.9": "NOK",
+    "Red Hat Enterprise Linux 9.0": "OK",
+    "Red Hat Enterprise Linux 9.1": "OK"
 }
