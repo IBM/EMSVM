@@ -20,7 +20,7 @@ import mimetypes
 
 PROGRAM_NAME = "emsvm"
 # Remember to update the VERSION file too
-VERSION = "1.2"
+VERSION = "1.3"
 
 # Colorful constants
 RED = '\033[91m'
@@ -43,7 +43,7 @@ class EMSVM(object):
         RC 4  = Calculated MD5 sum and expected MD5 sum do not match
         RC 5  = Processor type or architecture not supported
         RC 6  = Mismatch on JSON file list and loading logic
-        RC 7  = Host is not a Redhat based system
+        RC 7  = Host is not a valid Redhat based system
         RC 8  = Host is not a Linux system
         RC 9  = JSON file does not exist
         RC 10 = Cannot run 'rpm'
@@ -86,21 +86,30 @@ class EMSVM(object):
         RC 47 = Cannot parse IOMMU groups and PCI addresses
         RC 48 = HSN or LSN IOMMU groups are not compliant with requirements
         RC 49 = No user confirmation for destrucive deletion of KVM domain
+        RC 50 = Not valid quantity of CPUs in system for XML scrapping
+        RC 51 = Virsh net-list failed to run
+        RC 52 = ESS network not in virsh net-list output
+        RC 53 = Virbr1 is not present in system
+        RC 54 = Systemctl status for hal failed
+        RC 55 = ibm-ess-hal is not at expected minimum version
+        RC 56 = ibm-ess-hal is not installed in system
         RC 100 = Tests completed and host does not qualify to run EMSVM
    """
 
-    def __init__ (self, subcommand, verbose, log_dir="/var/log/emsvm"):
+    def __init__ (self, subcommand, verbose, development, log_dir="/var/log/emsvm"):
         # Start the clock
         self.start_time_date_full = datetime.datetime.now()
         self.start_time_date = self.start_time_date_full.strftime('%Y_%m_%d_%H_%M_%S')
         self.subcommand = subcommand
         self.log_dir = log_dir
         self.verbose = verbose
+        self.development = development
         self.fatal_error = False
         self.long_hostname = os.uname()[1]
         self.hostname = self.long_hostname.split('.', 1)[0]
         self.fs_free_excluded = 0
         self.VM_mem = 0
+        self.min_HAL_version = "3.0.0.0-17.3"
 
         self.jsonFilesList = {
             "supported_OS.json",
@@ -129,7 +138,6 @@ class EMSVM(object):
         self.__check_root_user(False)
         # self.__check_FIPS(False)
 
-
         # devnull redirect destination
         self.DEVNULL = open(os.devnull, 'w')
 
@@ -153,6 +161,12 @@ class EMSVM(object):
             self.log_file
         )
 
+        if self.development:
+            self.log_this.warning(
+                "THIS FLAG IS INTENDED TO RUN IN DEVELOPMENT SYSTEM ONLY. " +
+                "IF THERE'S ANY ISSUE, IT'S RESPONSIBILITY OF THE USER."
+            )
+
         # Same Basic tests as before but logging them
         self.__check_os()
         self.__check_commands()
@@ -166,15 +180,15 @@ class EMSVM(object):
         self.__check_iommu_kernel_boot()
         self.__dump_rpms()
         self.__dump_nodedev_list()
+        self.__isThisIBMHost()
 
         # Define expected MD5 hashes of files
         self.HW_REQUIREMENTS_MD5 = "89c0a37440af4153ee0b09930c7177cb"
         self.NIC_ADAPTERS_MD5 = "8dea8f6348a5bcbe5ae40f4be0c90667"
         self.PACKAGES_MD5 = "18f419023e451155c505530dfc2b6131"
-        self.SUPPORTED_OS_MD5 = "25105d089bcd5e7fd626eb186a355292"
-        self.VM_DISK_MD5 = [
-            "9ab77eea81a0590865d0e82019f7838f"
-        ]
+        self.SUPPORTED_OS_MD5 = "11f932a5e8617e5ac159e01a961e7a8d"
+        self.VM_DISK_MD5_RH8 = "473a4bad6a933733868e8d41eda7b2c4"
+        self.VM_DISK_MD5_RH9 = "78a1543740b791dbb7eb9e70ce16406b"
 
         # Load files
         self.__load_json_files()
@@ -196,9 +210,17 @@ class EMSVM(object):
         # Set cross vars
         self.KVM_stgpool_name = "EMSVM"
         self.KVM_VM_name = "EMSVM"
-        self.KVM_machine = "pc-q35-rhel8.2.0"
+        if self.RH8:
+            self.KVM_machine = "pc-q35-rhel8.2.0"
+        elif self.RH9:
+            self.KVM_machine = "pc-q35-rhel9.0.0"
+        else:
+            # Unsupported OS Using RH8 CPU
+            self.KVM_machine = "pc-q35-rhel8.2.0"
+
         self.KVM_exec = "/usr/libexec/qemu-kvm"
         self.small_setup = False
+        self.ProductName = PROGRAM_NAME.upper()
 
         # Deeper OS version checks
         self.__check_os_dict()
@@ -366,6 +388,27 @@ class EMSVM(object):
                     self.log_this.debug(
                         "This is a RedHat based system"
                     )
+                    majorVersion = distro.major_version()
+                    if majorVersion == "9":
+                        self.log_this.debug(
+                            "This is a RedHat 9 system"
+                        )
+                        self.RH9 = True
+                        self.RH8 = False
+                    elif majorVersion == "8":
+                        self.log_this.debug(
+                            "This is a RedHat 8 system"
+                        )
+                        self.RH9 = False
+                        self.RH8 = True
+                    else:
+                        self.log_this.error(
+                            "This is not a RedHat 8 or 9"
+                        )
+                        self.log_this.debug(
+                        "Going to exit with RC=7"
+                        )
+                        sys.exit(7)
                 else:
                     self.log_this.error(
                         "This is not a RedHat Linux system"
@@ -458,6 +501,36 @@ class EMSVM(object):
             self.log_this.debug(
                 "Five seconds passed"
             )
+
+
+    def __isThisIBMHost(self):
+        self.log_this.debug(
+            "Going to check if this is a IBM host or customer host"
+        )
+        try:
+            dmidecode_output = subprocess.getoutput(
+                "dmidecode -s system-product-name"
+            )
+        except BaseException:
+            self.log_this.debug(
+                "Could not run " +
+                "dmidecode -s system-product-name"
+            )
+        self.log_this.debug(
+            "Got system-product-name " +
+            dmidecode_output
+        )
+        if "5149-23E" in dmidecode_output:
+            self.log_this.debug(
+                "This is a IBM host 5149-23E"
+            )
+            self.isIBMHost = True
+        else:
+            self.log_this.debug(
+                "This is not any IBM host"
+            )
+            self.isIBMHost = False
+
 
     def __packages_check(self):
         errors = 0
@@ -1677,7 +1750,7 @@ class EMSVM(object):
                     """'/>
                 </source>
                 <alias name='hostdev""" + str(count) + """' />
-                <address type="pci" domain='0x0000' bus='0x04' slot='0x""" + str(count) + """' function='0x0' />
+                <address type="pci" domain='0x0000' bus='0x00' slot='0x""" + str(count) + """' function='0x0' />
             </hostdev>
             """
             count = count + 1
@@ -1798,18 +1871,70 @@ class EMSVM(object):
             <memory unit='GiB'>""" + str(self.VM_mem) + """</memory>
             <currentMemory unit='GiB'>""" + str(self.VM_mem) + """</currentMemory>
             <vcpu placement='static'>""" + str(self.VM_cores) + """</vcpu>
-            <sysinfo type='smbios'>
-                <bios>
-                <entry name='vendor'>IBM</entry>
-                </bios>
-                <system>
-                <entry name='product'>""" + PROGRAM_NAME.upper() + """</entry>
-                <entry name='version'>""" + VERSION + """</entry>
-                <entry name='serial'>""" + str(mySerial) + """</entry>
-                </system>
-            </sysinfo>
+        """
+        if self.isIBMHost and not self.development:
+
+            manufacturer = self.__exec_cmd("dmidecode -s system-manufacturer", decode=True).strip("\n")
+            product = self.__exec_cmd("dmidecode -s system-product-name", decode=True).strip("\n")
+            serial = self.__exec_cmd("dmidecode -s system-serial-number", decode=True).strip("\n")
+            sku = self.__exec_cmd("dmidecode -s  system-sku-number", decode=True).strip("\n")
+            family = self.__exec_cmd("dmidecode -s system-family", decode=True).strip("\n")
+
+            self.log_this.debug(
+                "Received following info for EMSVM: \n" +
+                "System Manufacturer:\t" + str(manufacturer) + "\n" +
+                "System Product Name:\t" + str(product) + "\n" +
+                "System Serial Number:\t" + str(serial) + "\n" +
+                "System SKU Number:\t" + str(sku) + "\n" +
+                "System Family Name:\t" + str(family)
+            )
+            self.log_this.debug(
+                "Going to check if values are the expected ones"
+            )
+            # Hacks for pre-released customer hardware (internal test/development)
+            # BEGINNING OF HACKS #################################################
+            if "IBM" not in str(manufacturer):
+                manufacturer = "IBM"
+
+            if "-23E" not in str(sku):
+                sku = "5149-23E"
+
+            if "Storage Scale System" not in str(family):
+                family = "IBM Storage Scale System"
+            # END OF HACKS #######################################################
+
+            xml_vm_begin += """
+                <sysinfo type='smbios'>
+                    <bios>
+                    <entry name='vendor'>IBM</entry>
+                    </bios>
+                    <system>
+                    <entry name='manufacturer'>""" + str(manufacturer) + """</entry>
+                    <entry name='product'>""" + self.ProductName + "-23E" + """</entry>
+                    <entry name='version'>""" + VERSION + """</entry>
+                    <entry name='serial'>""" + str(serial) + """</entry>
+                    <entry name='sku'>""" + str(sku) + """</entry>
+                    <entry name='family'>""" + str(family) + """</entry>
+                    </system>
+                </sysinfo>
+            """
+        else:
+            xml_vm_begin += """
+                <sysinfo type='smbios'>
+                    <bios>
+                    <entry name='vendor'>IBM</entry>
+                    </bios>
+                    <system>
+                    <entry name='product'>""" + self.ProductName + """</entry>
+                    <entry name='version'>""" + VERSION + """</entry>
+                    <entry name='serial'>""" + str(mySerial) + """</entry>
+                    </system>
+                </sysinfo>
+            """
+
+        xml_vm_begin += """
             <os>
-                <type arch='x86_64'>hvm</type>
+                <type arch='x86_64' machine='""" + self.KVM_machine + """'>hvm</type>
                 <boot dev='hd'/>
                 <smbios mode='sysinfo'/>
             </os>
@@ -1821,7 +1946,13 @@ class EMSVM(object):
                 <vapic state='on'/>
                 <spinlocks state='on' retries='8191'/>
                 </hyperv>
-            </features>
+            </features>"""
+
+        if self.RH9:
+            xml_vm_begin += """
+            <cpu mode='host-passthrough' check='none' migratable='on'/>"""
+
+        xml_vm_begin += """
             <on_poweroff>destroy</on_poweroff>
             <on_reboot>restart</on_reboot>
             <on_crash>restart</on_crash>
@@ -1840,28 +1971,33 @@ class EMSVM(object):
                 <console type="pty">
                 <target type="serial" port="0"/>
                 </console>
+                """
+        if self.RH9:
+            xml_vm_begin += """
+                <controller type='pci' index='0' model='pcie-root'/>
+                <controller type='usb' index='1' model='piix3-uhci'>
+                    <address type='pci' domain='0x0000' bus='0x00' slot='0x01' function='0x2'/>
+                </controller>
             """
 
-        host_only_interface = """
-        <interface type='bridge'>
-                <mac address='52:54:00:d7:8d:61'/>
-                <source bridge='virbr1'/>
-                <target dev='vnet1'/>
-                <model type='virtio'/>
-                <alias name='net0'/>
-                <address type='pci' domain='0x0000' bus='0x00' slot='0x09' function='0x0'/>
-            </interface>
-        """
+        if self.isIBMHost and not self.development:
+            xml_vm_begin += """
+                <interface type='bridge'>
+                    <mac address='52:54:00:d7:8d:61'/>
+                    <source bridge='virbr1'/>
+                    <target dev='vnet1'/>
+                    <model type='virtio'/>
+                    <alias name='net0'/>
+                    <address type='pci' domain='0x0000' bus='0x00' slot='0x09' function='0x0'/>
+                </interface>
+            """
 
         xml_vm_end = """
             </devices>
             </domain>
         """
         self.__craft_PCI_XML()
-        if self.subcommand == "start_utility_node_EMS":
-            xml_vm = xml_vm_begin + self.xml_vm_pci + host_only_interface + xml_vm_end
-        else:
-            xml_vm = xml_vm_begin + self.xml_vm_pci + xml_vm_end
+        xml_vm = xml_vm_begin + self.xml_vm_pci + xml_vm_end
 
         self.log_this.debug(
             "Crafted KVM VM domain: " +
@@ -2656,16 +2792,34 @@ class EMSVM(object):
                 )
 
                 localEMSVMDiskFileMD5 = self.__md5_chksum(compressedDiskFile)
-                if localEMSVMDiskFileMD5 in self.VM_DISK_MD5:
-                    fileMD5OK = True
-                    self.log_this.debug(
-                        "Found MD5 match for EMSVM compressed disk file"
-                    )
+                if self.isIBMHost:
+                    if self.development and localEMSVMDiskFileMD5 in self.VM_DISK_MD5_RH8:
+                        fileMD5OK = True
+                        self.log_this.debug(
+                            "Found MD5 match for EMSVM compressed disk file"
+                        )
+                    elif localEMSVMDiskFileMD5 in self.VM_DISK_MD5_RH9:
+                        fileMD5OK = True
+                        self.log_this.debug(
+                            "Found MD5 match for EMSVM compressed disk file"
+                        )
+                    else:
+                        fileMD5OK = False
+                        self.log_this.error(
+                            "Did not found MD5 match for EMSVM compressed disk file"
+                        )
                 else:
-                    fileMD5OK = False
-                    self.log_this.error(
-                        "Did not found MD5 match for EMSVM compressed disk file"
-                    )
+                    if localEMSVMDiskFileMD5 in self.VM_DISK_MD5_RH8:
+                        fileMD5OK = True
+                        self.log_this.debug(
+                            "Found MD5 match for EMSVM compressed disk file"
+                        )
+                    else:
+                        fileMD5OK = False
+                        self.log_this.error(
+                            "Did not found MD5 match for EMSVM compressed disk file"
+                        )
+
                 if fileMD5OK:
                     self.log_this.info(
                         "MD5 of " +
@@ -2682,7 +2836,7 @@ class EMSVM(object):
                         compressedDiskFile +
                         " is NOK. Please download again the file"
                     )
-                    self.log_this(
+                    self.log_this.debug(
                         "Going to exit with RC=4"
                     )
                     sys.exit(4)
@@ -2887,8 +3041,9 @@ class EMSVM(object):
             sys.exit(100)
         else:
             self.log_this.info(
-                "All tests were passed passed on " +
-                self.hostname
+                "All tests were passed passed on '" +
+                self.hostname +
+                "' host"
             )
             if self.small_setup:
                 self.log_this.info(
@@ -2945,7 +3100,7 @@ class EMSVM(object):
                     NOCOLOR +
                     "All tests passed, you can run EMSVM on " +
                     self.hostname +
-                    " host, for small setups of two or less EMS units only"
+                    " host, for small setups of two or less ESS units only"
                     )
                 print("")
                 self.log_this.debug(
@@ -3502,6 +3657,126 @@ class EMSVM(object):
                 sys.exit(36)
 
 
+    def __check_prereqs(self):
+        self.log_this.debug(
+            "Going to execute virsh net-list to avoid issues during startup"
+        )
+        try:
+            netList = self.__exec_cmd("virsh net-list", decode=True).strip("\n")
+        except BaseException:
+            self.log_this.error(
+                "Could not run virsh net-list " +
+                str(netList)
+            )
+            self.log_this.debug(
+                "Going to exit with RC=51"
+            )
+            sys.exit(51)
+        self.log_this.debug(
+            "Got output for virsh net-list" +
+            str(netList)
+        )
+
+        if "ess_vm_host_only_network" not in netList:
+            self.log_this.error(
+                "Could not find 'ess_vm_host_only_network' in vish net-list output " +
+                str(netList)
+            )
+            self.log_this.debug(
+                "Going to exit with RC=52"
+            )
+            sys.exit(52)
+
+        self.log_this.debug(
+            "Going to execute nmcli c show virbr1 check if exists before startup"
+        )
+        try:
+            virbr1Check = self.__exec_cmd("nmcli c show virbr1", decode=True).strip("\n")
+        except BaseException:
+            self.log_this.error(
+                "Could not correclty run nmcli c show virbr1 " +
+                str(virbr1Check)
+            )
+            self.log_this.error(
+                "virbr1 connection is required for creating the VM"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=53"
+            )
+            sys.exit(53)
+        self.log_this.debug(
+            "Got output for nmcli c show virbr1" +
+            str(virbr1Check)
+        )
+
+        self.log_this.debug(
+            "Going to execute 'rpm -q ibm-ess-hal' for checking if minior HAL version is installed."
+        )
+        try:
+            halVersion = self.__exec_cmd("rpm -q ibm-ess-hal --qf '%{VERSION}-%{RELEASE}\n'", decode=True).strip("\n")
+        except BaseException:
+            self.log_this.error(
+                "ibm-ess-hal is not installed, received status: " +
+                str(halVersion)
+            )
+            self.log_this.error(
+                "Installed ibm-ess-hal rpm is required for creating the VM"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=56"
+            )
+            sys.exit(56)
+
+        if str(halVersion) != self.min_HAL_version:
+            self.log_this.error(
+                "ibm-ess-hal is not at expected level, received version: " +
+                str(halVersion) + " and minimum expected version is: " + self.min_HAL_version
+            )
+            self.log_this.debug(
+                "Going to exit with RC=55"
+            )
+            sys.exit(55)
+
+        self.log_this.debug(
+            "IBM HAL version is: " +
+            str(halVersion)
+        )
+
+        self.log_this.debug(
+            "Going to execute systemctl is-active ibm-hal to verify is service is running prior startup"
+        )
+        try:
+            halCheck = self.__exec_cmd("systemctl is-active ibm-hal", decode=True).strip("\n")
+            if "inactive" in str(halCheck):
+                self.log_this.error(
+                    "IBM HAL service is not active, received status: " +
+                    str(halCheck)
+                )
+                self.log_this.error(
+                    "Active HAL service is required for creating the VM"
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=54"
+                )
+                sys.exit(54)
+        except BaseException:
+            self.log_this.error(
+                "Could not correclty run systemctl is-active ibm-hal " +
+                str(halCheck)
+            )
+            self.log_this.error(
+                "Active HAL service is required for creating the VM"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=54"
+            )
+            sys.exit(54)
+        self.log_this.debug(
+            "IBM HAL service status is: " +
+            str(halCheck)
+        )
+
+
     def startVM(self):
         self.log_this.debug(
             "Start VM has been called"
@@ -3582,6 +3857,9 @@ class EMSVM(object):
         # self.checkVM(startVM=True)
         # We have the domain created from above
         # self.__detach_PCI_cards()
+        if self.isIBMHost and not self.development:
+            self.__check_prereqs()
+
         self.__ask_host_license()
         self.log_this.info(
             "It can take several minutes to start the VM, please wait ..."
@@ -3890,11 +4168,14 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        '--utility-node',
+        '--i-know-what-i-am-doing',
+        '--dev',
+        required=False,
         action='store_true',
-        dest='utility_node',
-        help='Inidcate the command is specially targeted for the IBM Utility node hardware.',
-        default=False)
+        dest='development',
+        help=argparse.SUPPRESS,
+        default=False
+    )
 
     subcommand = parser.add_mutually_exclusive_group(required=True)
 
@@ -3946,10 +4227,8 @@ def parse_arguments():
 
     if args.check_host:
         subcommand = "check_host"
-    elif args.start_ems and not args.utility_node:
+    elif args.start_ems:
         subcommand = "start_EMS"
-    elif args.start_ems and args.utility_node:
-        subcommand = "start_utility_node_EMS"
     elif args.check_ems:
         subcommand = "check_EMS"
     elif args.connect_ems:
@@ -3962,13 +4241,13 @@ def parse_arguments():
         # Should not hit this
         sys.exit(RED + "QUIT: " + NOCOLOR + "Unexpected error parsing arguments\n")
 
-    return subcommand, args.verbose
+    return subcommand, args.verbose, args.development
 
 
 def main():
-    subcommand, verbose = parse_arguments()
-    this_host = EMSVM(subcommand, verbose)
-    if subcommand == "start_EMS" or subcommand == "start_utility_node_EMS":
+    subcommand, verbose, development = parse_arguments()
+    this_host = EMSVM(subcommand, verbose, development)
+    if subcommand == "start_EMS":
         host_check_passed = this_host.checkHost(startVM=True)
         VM_check_passed = this_host.checkVM(startVM=True)
         if host_check_passed:
