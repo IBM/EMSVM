@@ -109,7 +109,7 @@ class EMSVM(object):
         self.hostname = self.long_hostname.split('.', 1)[0]
         self.fs_free_excluded = 0
         self.VM_mem = 0
-        self.min_HAL_version = "3.0.0.0-17.3"
+        self.min_HAL_version = "3.0.0.0-17.4"
 
         self.jsonFilesList = {
             "supported_OS.json",
