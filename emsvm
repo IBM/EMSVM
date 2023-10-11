@@ -20,7 +20,7 @@ import mimetypes
 
 PROGRAM_NAME = "emsvm"
 # Remember to update the VERSION file too
-VERSION = "1.3"
+VERSION = "1.4"
 
 # Colorful constants
 RED = '\033[91m'
@@ -93,6 +93,7 @@ class EMSVM(object):
         RC 54 = Systemctl status for hal failed
         RC 55 = ibm-ess-hal is not at expected minimum version
         RC 56 = ibm-ess-hal is not installed in system
+        RC 57 = uknown ibm-ess-hal major version installed
         RC 100 = Tests completed and host does not qualify to run EMSVM
    """
 
@@ -109,7 +110,10 @@ class EMSVM(object):
         self.hostname = self.long_hostname.split('.', 1)[0]
         self.fs_free_excluded = 0
         self.VM_mem = 0
-        self.min_HAL_version = "3.0.0.0-17.4"
+        # We keep the lowest needed to HAL host mechanism to work per major relase
+        # This is only for utility so we cannot put on a JSON external file
+        self.min_HAL_version_3 = "3.0.0.0-17.4"
+        self.min_HAL_version_4 = "4.0.0.0-8.0"
 
         self.jsonFilesList = {
             "supported_OS.json",
@@ -183,12 +187,10 @@ class EMSVM(object):
         self.__isThisIBMHost()
 
         # Define expected MD5 hashes of files
-        self.HW_REQUIREMENTS_MD5 = "89c0a37440af4153ee0b09930c7177cb"
+        self.HW_REQUIREMENTS_MD5 = "e84a1f9e468222b7c65bd690377c531f"
         self.NIC_ADAPTERS_MD5 = "8dea8f6348a5bcbe5ae40f4be0c90667"
         self.PACKAGES_MD5 = "18f419023e451155c505530dfc2b6131"
         self.SUPPORTED_OS_MD5 = "11f932a5e8617e5ac159e01a961e7a8d"
-        self.VM_DISK_MD5_RH8 = "473a4bad6a933733868e8d41eda7b2c4"
-        self.VM_DISK_MD5_RH9 = "78a1543740b791dbb7eb9e70ce16406b"
 
         # Load files
         self.__load_json_files()
@@ -201,22 +203,38 @@ class EMSVM(object):
         self.min_gb_ram = self.HW_dictionary['MIN_GB_RAM']
         self.min_gb_ram_small = self.HW_dictionary['MIN_GB_RAM_SMALL']
         self.tuned_profile = self.HW_dictionary['TUNED_PROFILE']
-        self.VMFileFullURL = (
-            self.HW_dictionary['FS_PATH'] +
-            "/" +
-            self.HW_dictionary['VM_DISK_FILE']
-        )
 
-        # Set cross vars
-        self.KVM_stgpool_name = "EMSVM"
-        self.KVM_VM_name = "EMSVM"
-        if self.RH8:
+        # KEEP all images of all types MD5 sums here
+        self.VM_DISK_MD5 = [
+            "5a6bfa25b8351b6863762226ffaca37d", 
+            "52469f825dcc1080ee17e900086ceda6",
+            "473a4bad6a933733868e8d41eda7b2c4",
+            "78a1543740b791dbb7eb9e70ce16406b",
+            "fe0038502c6d5a5ae8790e0098fb2ece"
+        ]
+
+        if self.development or (self.RH8 and not self.isIBMHost):
+            self.VMFileFullURL = (
+                self.HW_dictionary['FS_PATH'] +
+                "/" +
+                self.HW_dictionary['VM_DISK_FILE_EMSVM']
+            )
+            self.KVM_stgpool_name = "EMSVM"
+            self.KVM_VM_name = "EMSVM"
             self.KVM_machine = "pc-q35-rhel8.2.0"
-        elif self.RH9:
+        elif self.RH9 and self.isIBMHost:
+            self.VMFileFullURL = (
+                self.HW_dictionary['FS_PATH'] +
+                "/" +
+                self.HW_dictionary['VM_DISK_FILE_EMSVM_23E']
+            )
+            self.KVM_stgpool_name = "EMSVM_23E"
+            self.KVM_VM_name = "EMSVM-23E"
             self.KVM_machine = "pc-q35-rhel9.0.0"
+            
         else:
-            # Unsupported OS Using RH8 CPU
-            self.KVM_machine = "pc-q35-rhel8.2.0"
+            self.log_this.fatal("Unknow type of Host and it's operating system. We support only Redhat 8.x for BYOE and Rhel 9.x for EMSVM-23E.")
+            sys.exit(100)
 
         self.KVM_exec = "/usr/libexec/qemu-kvm"
         self.small_setup = False
@@ -1229,14 +1247,14 @@ class EMSVM(object):
                 mem_gb_str +
                 " GB is less than " +
                 str(min_gb_ram) +
-                " GB required"
+                " GB required for standard setups"
             )
             self.log_this.info(
                 "Host memory of " +
                 mem_gb_str +
                 " GB is equal or more than " +
-                str(min_gb_ram) +
-                " GB required for small setups of two or less EMS units"
+                str(min_gb_ram_small) +
+                " GB required for small setups of two or less ESS building blocks"
             )
             self.small_setup = True
         elif mem_gb < min_gb_ram_small:
@@ -1245,7 +1263,7 @@ class EMSVM(object):
                 mem_gb_str +
                 " GB is less than " +
                 str(min_gb_ram_small) +
-                " GB required to run even small setups"
+                " GB required to run standard setups or small setups"
             )
             self.fatal_error = True
         else:
@@ -1690,26 +1708,29 @@ class EMSVM(object):
         )
         self.__connect_local_QEMU()
         try:
-            stgpool = self.QEMU_conn.storagePoolLookupByName(self.KVM_stgpool_name)
+            stgpool = self.QEMU_conn.storagePoolLookupByTargetPath(self.fs_vm)
             pool_exists = True
             self.log_this.info(
                 "KVM storage pool " +
-                self.KVM_stgpool_name +
+                " with path " +
+                self.fs_vm +
                 " already exists"
             )
             pool_exists = True
         except BaseException:
             self.log_this.debug(
                 "KVM storage pool " +
-                self.KVM_stgpool_name +
-                " already exists"
+                " with path " +
+                self.fs_vm +
+                " doesn't exists"
             )
             pool_exists = False
         if not pool_exists:
             self.log_this.warning(
                 "KVM storage pool " +
-                self.KVM_stgpool_name +
-                " does not exist. Going to create it"
+                " with path " +
+                self.fs_vm +
+                " does not exist. Going to create it."
             )
             self.__create_KVM_storage_pool()
 
@@ -1866,7 +1887,7 @@ class EMSVM(object):
             <domain type='kvm'>
             <name>""" + self.KVM_VM_name + """</name>
             <uuid>""" + vmUID + """</uuid>
-            <description>EMSVM</description>
+            <description>EMS as a VM</description>
 
             <memory unit='GiB'>""" + str(self.VM_mem) + """</memory>
             <currentMemory unit='GiB'>""" + str(self.VM_mem) + """</currentMemory>
@@ -2271,9 +2292,7 @@ class EMSVM(object):
             )
             # If file is there already lets add that to the "free" space
             if self.__check_file_exists(self.VMFileFullURL):
-
                 self.__check_KVM_storage_pool()
-
                 self.log_this.debug(
                     "EMSVM virtual disk file already exists, need to account for that size"
                 )
@@ -2793,12 +2812,12 @@ class EMSVM(object):
 
                 localEMSVMDiskFileMD5 = self.__md5_chksum(compressedDiskFile)
                 if self.isIBMHost:
-                    if self.development and localEMSVMDiskFileMD5 in self.VM_DISK_MD5_RH8:
+                    if self.development and localEMSVMDiskFileMD5 in self.VM_DISK_MD5:
                         fileMD5OK = True
                         self.log_this.debug(
                             "Found MD5 match for EMSVM compressed disk file"
                         )
-                    elif localEMSVMDiskFileMD5 in self.VM_DISK_MD5_RH9:
+                    elif localEMSVMDiskFileMD5 in self.VM_DISK_MD5:
                         fileMD5OK = True
                         self.log_this.debug(
                             "Found MD5 match for EMSVM compressed disk file"
@@ -2809,7 +2828,7 @@ class EMSVM(object):
                             "Did not found MD5 match for EMSVM compressed disk file"
                         )
                 else:
-                    if localEMSVMDiskFileMD5 in self.VM_DISK_MD5_RH8:
+                    if localEMSVMDiskFileMD5 in self.VM_DISK_MD5:
                         fileMD5OK = True
                         self.log_this.debug(
                             "Found MD5 match for EMSVM compressed disk file"
@@ -3657,7 +3676,7 @@ class EMSVM(object):
                 sys.exit(36)
 
 
-    def __check_prereqs(self):
+    def __check_IBMHost_prereqs(self):
         self.log_this.debug(
             "Going to execute virsh net-list to avoid issues during startup"
         )
@@ -3727,10 +3746,13 @@ class EMSVM(object):
             )
             sys.exit(56)
 
-        if str(halVersion) != self.min_HAL_version:
+        versionHALOK = self.__check_min_HAL_version(halVersion)
+        if not versionHALOK:
             self.log_this.error(
-                "ibm-ess-hal is not at expected level, received version: " +
-                str(halVersion) + " and minimum expected version is: " + self.min_HAL_version
+                "Installed IBM HAL version " +
+                halVersion +
+                " is not high enough to continue. " +
+                "Please contact IBM support"
             )
             self.log_this.debug(
                 "Going to exit with RC=55"
@@ -3755,6 +3777,10 @@ class EMSVM(object):
                 self.log_this.error(
                     "Active HAL service is required for creating the VM"
                 )
+                self.log_this.info(
+                    "Try to start it with 'systemctl enable ibm-hal --now' and try this tool again. " +
+                    "If that does not fix this error, contact IBM support"
+                )
                 self.log_this.debug(
                     "Going to exit with RC=54"
                 )
@@ -3775,6 +3801,89 @@ class EMSVM(object):
             "IBM HAL service status is: " +
             str(halCheck)
         )
+
+
+
+    def __check_min_HAL_version(self, halVersion):
+        self.log_this.debug(
+            "Going to check if HAL version installed " +
+            str(halVersion) +
+            " is new enought to continue"
+        )
+        self.log_this.debug(
+            "Current min HAL version required for 3.x version is " +
+            self.min_HAL_version_3
+        )
+        self.log_this.debug(
+            "Current min HAL version required for 4.x version is " +
+            self.min_HAL_version_4
+        )
+        regex_HAL_version = r"(?P<D1>\d)\.(?P<D2>\d{1,2})\.(?P<D3>\d{1,2})\.(?P<D4>\d{1,2})-(?P<P1>\d{1,2})\.(?P<P2>\d{1,2})"
+        HALVERSIONREGEX = re.compile(regex_HAL_version)
+        installedHALre = HALVERSIONREGEX.match(halVersion)
+        if installedHALre:
+            majorHALNumber = installedHALre.group('D1')
+            if majorHALNumber == '3':
+                self.log_this.debug(
+                    "We detected this installed HAL is major release 3 version"
+                )
+                minHALre = HALVERSIONREGEX.match(self.min_HAL_version_3)
+            elif majorHALNumber == '4':
+                self.log_this.debug(
+                    "We detected this installed HAL is major release 4 version"
+                )
+                minHALre = HALVERSIONREGEX.match(self.min_HAL_version_4)
+            else:
+                self.log_this.error(
+                    "Do not find HAL version 3 or 4 in this system, found " +
+                    str(halVersion) +
+                    ". Contact IBM support"
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=57"
+                )
+                sys.exit(57)
+        else:
+            self.log_this.error(
+                "Installed HAL version " +
+                str(halVersion) +
+                " does not match a valid regex for HAL versions. " +
+                "Please contact IBM support"
+            )
+            self.log_this.debug(
+                    "Going to exit with RC=57"
+                )
+            sys.exit(57)
+
+        # Lets skip the D1, already done above
+        minVersionPasses = True
+        digitsToTest = [ "D2", "D3", "D4", "P1", "P2" ]
+        for digit in digitsToTest:
+            if installedHALre.group(digit) > minHALre.group(digit):
+                self.log_this.debug(
+                    "Installed HAL " +
+                    digit +
+                    " is higher than min required"
+                )
+                return minVersionPasses
+            elif installedHALre.group(digit) < minHALre.group(digit):
+                self.log_this.debug(
+                    "Installed HAL " +
+                    digit +
+                    " is lower than min required"
+                )
+                minVersionPasses = False
+                return minVersionPasses
+            elif installedHALre.group(digit) == minHALre.group(digit):
+                self.log_this.debug(
+                    "Digit " +
+                    digit +
+                    " is equal installed and min required, we move on"
+                )
+        self.log_this.debug(
+            "We made it this far so we think installed and required are equal"
+        )
+        return minVersionPasses
 
 
     def startVM(self):
@@ -3858,7 +3967,7 @@ class EMSVM(object):
         # We have the domain created from above
         # self.__detach_PCI_cards()
         if self.isIBMHost and not self.development:
-            self.__check_prereqs()
+            self.__check_IBMHost_prereqs()
 
         self.__ask_host_license()
         self.log_this.info(
@@ -4054,7 +4163,7 @@ class EMSVM(object):
                 "Going to connect to EMS console"
             )
         try:
-            os.system("sudo virsh console EMSVM --force")
+            os.system("sudo virsh console " + self.KVM_VM_name + " --force")
         except BaseException:
             self.log_this.error(
                 "Could not connect to EMSVM with virsh console"

@@ -1,15 +1,16 @@
 {
-    "json_version": "1.1",
-    "MIN_CORES_SMALL": 16,
-    "MIN_CORES": 32,
-    "HOST_OS_CORES_RESERVED": 2,
-    "HOST_OS_MEM_RESERVED": 8,
-    "HOST_MEM_PCT_VM_MEM": 85,
-    "MIN_GB_RAM_SMALL": 122,
-    "MIN_GB_RAM": 247,
-    "MIN_GB_FREE_FS": 575,
-    "FS_PATH": "/emsvm",
-    "FS_PATH2": "/essvm", 
-    "VM_DISK_FILE": "EMSVM.qcow2",
-    "TUNED_PROFILE": "virtual-host"
-  }
+  "json_version": "1.1",
+  "MIN_CORES_SMALL": 16,
+  "MIN_CORES": 32,
+  "HOST_OS_CORES_RESERVED": 2,
+  "HOST_OS_MEM_RESERVED": 8,
+  "HOST_MEM_PCT_VM_MEM": 85,
+  "MIN_GB_RAM_SMALL": 122,
+  "MIN_GB_RAM": 247,
+  "MIN_GB_FREE_FS": 575,
+  "FS_PATH": "/emsvm",
+  "FS_PATH2": "/essvm",
+  "VM_DISK_FILE_EMSVM": "EMSVM.qcow2",
+  "VM_DISK_FILE_EMSVM_23E": "EMSVM-23E.qcow2",
+  "TUNED_PROFILE": "virtual-host"
+}

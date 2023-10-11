@@ -12,3 +12,7 @@
     - First release with utility node
     - Misc typos
     - Added new CPU type for RH9
+- 1.4
+    - Memory message for small setups fixed
+    - Multiple Utility node changes (HAL, MOFED, OS, ...)
+    - MD5 checks for multiple versions
