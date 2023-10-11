@@ -213,7 +213,7 @@ class EMSVM(object):
             "fe0038502c6d5a5ae8790e0098fb2ece"
         ]
 
-        if self.development or (self.RH8 and not self.isIBMHost):
+        if self.development or self.RH8:
             self.VMFileFullURL = (
                 self.HW_dictionary['FS_PATH'] +
                 "/" +
@@ -231,9 +231,17 @@ class EMSVM(object):
             self.KVM_stgpool_name = "EMSVM_23E"
             self.KVM_VM_name = "EMSVM-23E"
             self.KVM_machine = "pc-q35-rhel9.0.0"
-            
+        elif self.RH9:
+            self.VMFileFullURL = (
+                self.HW_dictionary['FS_PATH'] +
+                "/" +
+                self.HW_dictionary['VM_DISK_FILE_EMSVM']
+            )
+            self.KVM_stgpool_name = "EMSVM"
+            self.KVM_VM_name = "EMSVM"
+            self.KVM_machine = "pc-q35-rhel9.0.0"
         else:
-            self.log_this.fatal("Unknow type of Host and it's operating system. We support only Redhat 8.x for BYOE and Rhel 9.x for EMSVM-23E.")
+            self.log_this.fatal("Unknow type of Host and it's operating system")
             sys.exit(100)
 
         self.KVM_exec = "/usr/libexec/qemu-kvm"
