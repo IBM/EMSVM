@@ -16,3 +16,6 @@
     - Memory message for small setups fixed
     - Multiple Utility node changes (HAL, MOFED, OS, ...)
     - MD5 checks for multiple versions
+
+- 1.5
+    - Fix HAL min version checks

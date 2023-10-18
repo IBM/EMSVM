@@ -20,7 +20,7 @@ import mimetypes
 
 PROGRAM_NAME = "emsvm"
 # Remember to update the VERSION file too
-VERSION = "1.4"
+VERSION = "1.5"
 
 # Colorful constants
 RED = '\033[91m'
@@ -3830,13 +3830,13 @@ class EMSVM(object):
         HALVERSIONREGEX = re.compile(regex_HAL_version)
         installedHALre = HALVERSIONREGEX.match(halVersion)
         if installedHALre:
-            majorHALNumber = installedHALre.group('D1')
-            if majorHALNumber == '3':
+            majorHALNumber = int(installedHALre.group('D1'))
+            if majorHALNumber == 3:
                 self.log_this.debug(
                     "We detected this installed HAL is major release 3 version"
                 )
                 minHALre = HALVERSIONREGEX.match(self.min_HAL_version_3)
-            elif majorHALNumber == '4':
+            elif majorHALNumber == 4:
                 self.log_this.debug(
                     "We detected this installed HAL is major release 4 version"
                 )
@@ -3867,14 +3867,14 @@ class EMSVM(object):
         minVersionPasses = True
         digitsToTest = [ "D2", "D3", "D4", "P1", "P2" ]
         for digit in digitsToTest:
-            if installedHALre.group(digit) > minHALre.group(digit):
+            if int(installedHALre.group(digit)) > int(minHALre.group(digit)):
                 self.log_this.debug(
                     "Installed HAL " +
                     digit +
                     " is higher than min required"
                 )
                 return minVersionPasses
-            elif installedHALre.group(digit) < minHALre.group(digit):
+            elif int(installedHALre.group(digit)) < int(minHALre.group(digit)):
                 self.log_this.debug(
                     "Installed HAL " +
                     digit +
@@ -3882,7 +3882,7 @@ class EMSVM(object):
                 )
                 minVersionPasses = False
                 return minVersionPasses
-            elif installedHALre.group(digit) == minHALre.group(digit):
+            elif int(installedHALre.group(digit)) == int(minHALre.group(digit)):
                 self.log_this.debug(
                     "Digit " +
                     digit +
