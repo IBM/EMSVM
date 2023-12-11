@@ -20,7 +20,7 @@ import mimetypes
 
 PROGRAM_NAME = "emsvm"
 # Remember to update the VERSION file too
-VERSION = "1.5"
+VERSION = "1.6"
 
 # Colorful constants
 RED = '\033[91m'
