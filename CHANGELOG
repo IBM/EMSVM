@@ -19,3 +19,8 @@
 
 - 1.5
     - Fix HAL min version checks
+
+- 1.6
+    - Fix host license question for IBM Utility host
+    - Removed hardcoded MAC on internal bridge
+    - Misc typos

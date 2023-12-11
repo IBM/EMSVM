@@ -206,11 +206,11 @@ class EMSVM(object):
 
         # KEEP all images of all types MD5 sums here
         self.VM_DISK_MD5 = [
-            "5a6bfa25b8351b6863762226ffaca37d", 
-            "52469f825dcc1080ee17e900086ceda6",
-            "473a4bad6a933733868e8d41eda7b2c4",
-            "78a1543740b791dbb7eb9e70ce16406b",
-            "fe0038502c6d5a5ae8790e0098fb2ece"
+            "5a6bfa25b8351b6863762226ffaca37d", # EMSVM-23E-9.1.qcow2.xz
+            "c28bd8ed995a35190bb30a644b7b5b98", # EMSVM-23E-9.2.qcow2.xz
+            "473a4bad6a933733868e8d41eda7b2c4", # EMSVM-8.6.qcow2.xz
+            "78a1543740b791dbb7eb9e70ce16406b", # 
+            "6c89173fcfbc9459c719ad9349c7c3c6"  # EMSVM-8.8.qcow2.xz
         ]
 
         if self.development or self.RH8:
@@ -1920,17 +1920,6 @@ class EMSVM(object):
             self.log_this.debug(
                 "Going to check if values are the expected ones"
             )
-            # Hacks for pre-released customer hardware (internal test/development)
-            # BEGINNING OF HACKS #################################################
-            if "IBM" not in str(manufacturer):
-                manufacturer = "IBM"
-
-            if "-23E" not in str(sku):
-                sku = "5149-23E"
-
-            if "Storage Scale System" not in str(family):
-                family = "IBM Storage Scale System"
-            # END OF HACKS #######################################################
 
             xml_vm_begin += """
                 <sysinfo type='smbios'>
@@ -2012,7 +2001,6 @@ class EMSVM(object):
         if self.isIBMHost and not self.development:
             xml_vm_begin += """
                 <interface type='bridge'>
-                    <mac address='52:54:00:d7:8d:61'/>
                     <source bridge='virbr1'/>
                     <target dev='vnet1'/>
                     <model type='virtio'/>
@@ -3977,7 +3965,9 @@ class EMSVM(object):
         if self.isIBMHost and not self.development:
             self.__check_IBMHost_prereqs()
 
-        self.__ask_host_license()
+
+        if not self.isIBMHost:
+            self.__ask_host_license()
         self.log_this.info(
             "It can take several minutes to start the VM, please wait ..."
         )
