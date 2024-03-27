@@ -1,7 +1,7 @@
-This tool assesses the readiness of a node to run IBM Spectrum Scale EMS as a VM. You should run the 'virt-host-validate qemu' command and pass all the checks there before running this tool.
+This tool assesses the readiness of a node to run IBM Storage Scale System EMS as a VM. You should run the 'virt-host-validate qemu' command and pass all the checks there before running this tool.
 
 **IMPORTANT**
-This tool is does not overrule the official documentation of the product. The requeriments stated on the official documenation are the authoritative ones as [IBM Storage Scale Server IBM Documentation](https://www.ibm.com/docs/en/ess/6.1.5_lts)
+This tool is does not overrule the official documentation of the product. The requirements stated on the official documenation are the authoritative ones as [IBM Storage Scale System IBM Documentation](https://www.ibm.com/docs/en/ess/6.1.5_lts)
 
 Please have in mind some requirements are hardware related and must be checked with your hardware provider, specially the IOMMU settings on BIOS and motherboard layouts to achieve IOMMU groups in the required way.
 
@@ -15,7 +15,7 @@ A small setup is defined by an EMS that manages no more than two ESS building bl
  - KVM enabled and installed at OS
  - A PCI passthrough capable system
  - Minimum of 600 GB free on /emsvm
- - /emsvm must be mounted on a local filesystem on a local device (not: iSCSI, FC, NFS, Spectrum Scale, ...)
+ - /emsvm must be mounted on a local filesystem on a local device (not: iSCSI, FC, NFS, Storage Scale, ...)
  - One quad port Ethernet card for Low Speed Network (LSN), with all ports identical
  - The LSN card must belong to its own IOMMU group, preferrible each port on its own IOMMU group
  - RedHat Enterprise Linux (8.6, 8.7, 9.0, 9.1) running in the host with a valid subscription
@@ -23,7 +23,7 @@ A small setup is defined by an EMS that manages no more than two ESS building bl
  - Host fully compliant with tuned virtual-host profile
  - No other VM[s] running in the host
  - No other workload[s] running in the host
- - Host cannot have Spectrum Scale software installed
+ - Host cannot have Storage Scale software installed
  - At least one ConnectX-6 VPI card for High Speed Network (HSN)
  - Each HSN card must belong to its own IOMMU group, for multi port preferrible each port on its own IOMMU group
  - No more than the three HSN NIC
@@ -40,7 +40,7 @@ A small setup is defined by an EMS that manages no more than two ESS building bl
 - Highly recommended:
   - Host boot OS mirrored drives (SW or HW)
   - At least one Ethernet dedicated card to access the host once the EMS VM is running
-   Dual port ConectX card[s]
+   Dual port ConnectX card[s]
   - Out of band management for the host
   - Setup kdump 
 
@@ -54,9 +54,9 @@ A small setup is defined by an EMS that manages no more than two ESS building bl
 - FIPS node not allowed in the host
 
 **Other information**
-If you have more than one quad core Ethernet card in the system the VM will get the one with lowest PCI address. Have that in mind for setting the host IPs.
+If you have more than one quad port Ethernet card in the system the VM will get the one with lowest PCI address. Have that in mind for setting the host IPs.
 
-If your host IPs are not on a quad core card, the card it would never be passed to the VM
+If your host IPs are not on a quad port card, the card it would never be passed to the VM.
 
 In this host:
 
@@ -149,9 +149,9 @@ OK: All tests passed, you can run EMS VM on ems1 host
 
 A bad run might look in many ways but would show as last summary line as read "ERROR" message
 
-To start the EMSVM run wiht ''--start-EMS'' parameter
+To start the EMSVM run with ''--start-EMS'' parameter
 
-To connect to the console of the EMSVM from the host run with ''--connect-EMS'' parameter. To disconnect use Ctrl + ] key combo
+To connect to the console of the EMSVM from the host run with ''--connect-EMS'' parameter. To disconnect use Ctrl + ] key combo.
 ```
 [root@x86unode EMSVM]# ./emsvm --connect-EMS
 2022-11-04 04:06:34,446 INFO:	 Welcome to EMS VM version 0.49
@@ -179,4 +179,4 @@ emsvm login:
 [root@x86unode EMSVM]# 
 ``` 
 
-There are no parameters to stop or delete the EMSVM by choice. Always power off the EMSVM from the EMSVM and having extreme care on Spectrum Scale quorum and other paramters and situations that might affect the Spectrum Scale cluster that EMSVM is part of and te host is not aware of.
+There are no parameters to stop or delete the EMSVM by choice. Always power off the EMSVM from the EMSVM and having extreme care on Storage Scale quorum and other paramters and situations that might affect the Storage Scale cluster that EMSVM is part of and the host is not aware of.

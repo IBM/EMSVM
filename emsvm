@@ -20,7 +20,7 @@ import mimetypes
 
 PROGRAM_NAME = "emsvm"
 # Remember to update the VERSION file too
-VERSION = "1.6"
+VERSION = "1.7"
 
 # Colorful constants
 RED = '\033[91m'
@@ -188,7 +188,7 @@ class EMSVM(object):
 
         # Define expected MD5 hashes of files
         self.HW_REQUIREMENTS_MD5 = "e84a1f9e468222b7c65bd690377c531f"
-        self.NIC_ADAPTERS_MD5 = "8dea8f6348a5bcbe5ae40f4be0c90667"
+        self.NIC_ADAPTERS_MD5 = "20b701ad44edee6d0500489ec4156025"
         self.PACKAGES_MD5 = "18f419023e451155c505530dfc2b6131"
         self.SUPPORTED_OS_MD5 = "11f932a5e8617e5ac159e01a961e7a8d"
 
@@ -2306,7 +2306,7 @@ class EMSVM(object):
                     " GB"
                 )
 
-            if self.min_gb_fs_size >= self.fs_free_excluded:
+            elif self.min_gb_fs_size >= self.fs_free_excluded:
                 self.log_this.error(
                     "The path " +
                     self.fs_vm +
@@ -3694,7 +3694,7 @@ class EMSVM(object):
 
         if "ess_vm_host_only_network" not in netList:
             self.log_this.error(
-                "Could not find 'ess_vm_host_only_network' in vish net-list output " +
+                "Could not find 'ess_vm_host_only_network' in virsh net-list output " +
                 str(netList)
             )
             self.log_this.debug(

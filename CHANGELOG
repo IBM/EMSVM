@@ -24,3 +24,6 @@
     - Fix host license question for IBM Utility host
     - Removed hardcoded MAC on internal bridge
     - Misc typos
+- 1.7
+    - Fix storage calculation of allocated for already deployed VM qcow2
+    - Added Connect-7 as possible NIC for HSN
