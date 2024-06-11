@@ -20,7 +20,7 @@ import mimetypes
 
 PROGRAM_NAME = "emsvm"
 # Remember to update the VERSION file too
-VERSION = "1.7"
+VERSION = "1.8"
 
 # Colorful constants
 RED = '\033[91m'
@@ -94,6 +94,11 @@ class EMSVM(object):
         RC 55 = ibm-ess-hal is not at expected minimum version
         RC 56 = ibm-ess-hal is not installed in system
         RC 57 = uknown ibm-ess-hal major version installed
+        RC 58 = Cannot run systemctl is-alive libvirtd
+        RC 59 = libvirtd is not active
+        RC 60 = Cannot run systemctl is-alive libvirtd dependent services
+        RC 61 = Some libvirtd dependent service is not active
+        RC 62 = Cannot restart libvirtd
         RC 100 = Tests completed and host does not qualify to run EMSVM
    """
 
@@ -185,6 +190,7 @@ class EMSVM(object):
         self.__dump_rpms()
         self.__dump_nodedev_list()
         self.__isThisIBMHost()
+        self.__libvirtd_startup_check()
 
         # Define expected MD5 hashes of files
         self.HW_REQUIREMENTS_MD5 = "e84a1f9e468222b7c65bd690377c531f"
@@ -209,7 +215,7 @@ class EMSVM(object):
             "5a6bfa25b8351b6863762226ffaca37d", # EMSVM-23E-9.1.qcow2.xz
             "c28bd8ed995a35190bb30a644b7b5b98", # EMSVM-23E-9.2.qcow2.xz
             "473a4bad6a933733868e8d41eda7b2c4", # EMSVM-8.6.qcow2.xz
-            "78a1543740b791dbb7eb9e70ce16406b", # 
+            "78a1543740b791dbb7eb9e70ce16406b", #
             "6c89173fcfbc9459c719ad9349c7c3c6"  # EMSVM-8.8.qcow2.xz
         ]
 
@@ -637,6 +643,115 @@ class EMSVM(object):
                     "This Linux distribution is not supported nor tested"
                 )
             self.fatal_error = True
+
+
+
+    def __libvirtd_startup_check(self):
+        is_libvirtd_UP = self.__libvirtd_check()
+        if is_libvirtd_UP:
+            self.log_this.debug(
+                "libvirtd is already UP, nothing to do ..."
+            )
+        else:
+            self.log_this.warning(
+                "libvirtd is not running, going to try to start it"
+            )
+            try:
+                rc_restart = subprocess.call(['systemctl','restart','libvirtd'],stdout=self.DEVNULL, stderr=self.DEVNULL)
+            except BaseException:
+                self.log_this.error(
+                    "Cannot restart libvirtd"
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=62"
+                )
+                sys.exit(62)
+            self.log_this.debug(
+                "libvirtd has been (re)started"
+            )
+            is_libvirtd_UP = self.__libvirtd_check()
+            if is_libvirtd_UP:
+                self.log_this.info(
+                    "libvirtd has been succesfully restarted"
+                )
+            else:
+                self.log_this.error(
+                    "Although we restarted libvirtd, it has not came alive."
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=62"
+                )
+                sys.exit(62)
+
+
+    def __libvirtd_dependant_check(self):
+        dependentServices = ["libvirtd-admin.socket", "libvirtd.socket", "libvirtd-ro.socket"]
+        self.log_this.debug(
+            "Going to check dependant libvirtd services status"
+        )
+
+        for service in dependentServices:
+            try:
+                return_code = subprocess.call(['systemctl','is-active',service],stdout=self.DEVNULL, stderr=self.DEVNULL)
+            except BaseException:
+                self.log_this.error(
+                    "Could not run 'systemctl is-active '" +
+                    service +
+                    "'"
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=60"
+                )
+                sys.exit(60)
+            if return_code != 0:
+                self.log_this.error(
+                    service +
+                    "is not running, start it now and at boot with " +
+                    "'systemctl enable " +
+                    service +
+                    " --now' and run this tool again"
+                )
+                self.log_this.debug(
+                    "Going to exit with RC=61"
+                )
+                sys.exit(61)
+            else:
+                self.log_this.debug(
+                    service +
+                    " is active, we continue"
+                )
+
+
+    def __libvirtd_check(self):
+        self. __libvirtd_dependant_check()
+        # Is libvirtd up
+        try:
+            return_code = subprocess.call(['systemctl','is-active','libvirtd'],stdout=self.DEVNULL, stderr=self.DEVNULL)
+            self.log_this.debug(
+                "We could run 'systemctl is-active libvirtd'"
+            )
+        except BaseException:
+            self.log_this.error(
+                "Could not run 'systemctl is-active libvirtd'"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=58"
+            )
+            sys.exit(58)
+        if return_code != 0:
+            self.log_this.error(
+                "libvirtd is not running, start it now and at boot with " +
+                "'systemctl enable libvirtd --now' and run this tool again"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=59"
+            )
+            sys.exit(59)
+        else:
+            self.log_this.debug(
+                "libvirtd is active, we continue"
+            )
+
 
 
     def __tuned_adm_check(self):
@@ -2003,6 +2118,7 @@ class EMSVM(object):
                 <interface type='bridge'>
                     <source bridge='virbr1'/>
                     <target dev='vnet1'/>
+                    <mac address='52:54:00:b2:57:2e'/>
                     <model type='virtio'/>
                     <alias name='net0'/>
                     <address type='pci' domain='0x0000' bus='0x00' slot='0x09' function='0x0'/>
