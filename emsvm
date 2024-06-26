@@ -94,11 +94,8 @@ class EMSVM(object):
         RC 55 = ibm-ess-hal is not at expected minimum version
         RC 56 = ibm-ess-hal is not installed in system
         RC 57 = uknown ibm-ess-hal major version installed
-        RC 58 = Cannot run systemctl is-alive libvirtd
-        RC 59 = libvirtd is not active
-        RC 60 = Cannot run systemctl is-alive libvirtd dependent services
-        RC 61 = Some libvirtd dependent service is not active
-        RC 62 = Cannot restart libvirtd
+        RC 58 = Cannot run systemctl is-alive <virt-related service>
+        RC 59 = Cannot start <virt-related service>
         RC 100 = Tests completed and host does not qualify to run EMSVM
    """
 
@@ -187,10 +184,10 @@ class EMSVM(object):
         self.__get_host_info()
         self.__check_KVM_capable()
         self.__check_iommu_kernel_boot()
+        self.__libvirt_startup_check()
         self.__dump_rpms()
         self.__dump_nodedev_list()
         self.__isThisIBMHost()
-        self.__libvirtd_startup_check()
 
         # Define expected MD5 hashes of files
         self.HW_REQUIREMENTS_MD5 = "e84a1f9e468222b7c65bd690377c531f"
@@ -646,111 +643,74 @@ class EMSVM(object):
 
 
 
-    def __libvirtd_startup_check(self):
-        is_libvirtd_UP = self.__libvirtd_check()
-        if is_libvirtd_UP:
-            self.log_this.debug(
-                "libvirtd is already UP, nothing to do ..."
-            )
-        else:
-            self.log_this.warning(
-                "libvirtd is not running, going to try to start it"
-            )
-            try:
-                rc_restart = subprocess.call(['systemctl','restart','libvirtd'],stdout=self.DEVNULL, stderr=self.DEVNULL)
-            except BaseException:
-                self.log_this.error(
-                    "Cannot restart libvirtd"
-                )
-                self.log_this.debug(
-                    "Going to exit with RC=62"
-                )
-                sys.exit(62)
-            self.log_this.debug(
-                "libvirtd has been (re)started"
-            )
-            is_libvirtd_UP = self.__libvirtd_check()
-            if is_libvirtd_UP:
-                self.log_this.info(
-                    "libvirtd has been succesfully restarted"
-                )
-            else:
-                self.log_this.error(
-                    "Although we restarted libvirtd, it has not came alive."
-                )
-                self.log_this.debug(
-                    "Going to exit with RC=62"
-                )
-                sys.exit(62)
-
-
-    def __libvirtd_dependant_check(self):
-        dependentServices = ["libvirtd-admin.socket", "libvirtd.socket", "libvirtd-ro.socket"]
+    def __libvirt_startup_check(self):
+        dependentServices = ["virtqemud.socket", "virtstoraged.socket", "virtnetworkd.socket", "virtnodedevd.socket"]
         self.log_this.debug(
-            "Going to check dependant libvirtd services status"
+            "Going to check dependant libvirt services status"
         )
 
         for service in dependentServices:
-            try:
-                return_code = subprocess.call(['systemctl','is-active',service],stdout=self.DEVNULL, stderr=self.DEVNULL)
-            except BaseException:
-                self.log_this.error(
-                    "Could not run 'systemctl is-active '" +
-                    service +
-                    "'"
-                )
-                self.log_this.debug(
-                    "Going to exit with RC=60"
-                )
-                sys.exit(60)
+            return_code = self.__libvirt_check(service)
             if return_code != 0:
-                self.log_this.error(
-                    service +
-                    "is not running, start it now and at boot with " +
-                    "'systemctl enable " +
-                    service +
-                    " --now' and run this tool again"
+                self.log_this.warning(
+                    service + " is not running, going to try to start it"
                 )
+                try:
+                    rc_restart = subprocess.call(['systemctl','start',service],stdout=self.DEVNULL, stderr=self.DEVNULL)
+                except BaseException:
+                    self.log_this.error(
+                        "Cannot start " + service
+                    )
+                    self.log_this.debug(
+                        "Going to exit with RC=59"
+                    )
+                    sys.exit(59)
                 self.log_this.debug(
-                    "Going to exit with RC=61"
+                    service + " has been started"
                 )
-                sys.exit(61)
-            else:
-                self.log_this.debug(
-                    service +
-                    " is active, we continue"
-                )
+                return_code = self.__libvirt_check(service)
+                if return_code == 0:
+                    self.log_this.info(
+                        service + " has been succesfully started"
+                    )
+                else:
+                    if rc_restart == 0:
+                        self.log_this.error(
+                            "Although we started " + service + ", it has not came alive."
+                        )
+                    else:
+                        self.log_this.error(
+                            "It was not possible to start " + service
+                        )
+                    self.log_this.debug(
+                        "Going to exit with RC=59"
+                    )
+                    sys.exit(59)
 
 
-    def __libvirtd_check(self):
-        self. __libvirtd_dependant_check()
-        # Is libvirtd up
+    def __libvirt_check(self, servicetoCheck):
         try:
-            return_code = subprocess.call(['systemctl','is-active','libvirtd'],stdout=self.DEVNULL, stderr=self.DEVNULL)
+            return_code = subprocess.call(['systemctl','is-active',servicetoCheck],stdout=self.DEVNULL, stderr=self.DEVNULL)
             self.log_this.debug(
-                "We could run 'systemctl is-active libvirtd'"
+                "We could run 'systemctl is-active " + servicetoCheck + "'"
             )
         except BaseException:
             self.log_this.error(
-                "Could not run 'systemctl is-active libvirtd'"
+                "Could not run 'systemctl is-active " + servicetoCheck + "'"
             )
             self.log_this.debug(
                 "Going to exit with RC=58"
             )
             sys.exit(58)
         if return_code != 0:
-            self.log_this.error(
-                "libvirtd is not running, start it now and at boot with " +
-                "'systemctl enable libvirtd --now' and run this tool again"
-            )
             self.log_this.debug(
-                "Going to exit with RC=59"
+                servicetoCheck + " is not running."
             )
-            sys.exit(59)
         else:
             self.log_this.debug(
-                "libvirtd is active, we continue"
+                servicetoCheck + " is active, we continue"
             )
+        return return_code
 
 
 
