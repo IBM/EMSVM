@@ -20,7 +20,7 @@ import mimetypes
 
 PROGRAM_NAME = "emsvm"
 # Remember to update the VERSION file too
-VERSION = "1.8"
+VERSION = "1.9"
 
 # Colorful constants
 RED = '\033[91m'
@@ -94,8 +94,9 @@ class EMSVM(object):
         RC 55 = ibm-ess-hal is not at expected minimum version
         RC 56 = ibm-ess-hal is not installed in system
         RC 57 = uknown ibm-ess-hal major version installed
-        RC 58 = Cannot run systemctl is-alive <virt-related service>
+        RC 58 = Cannot run systemctl is-active/is-enabled <virt-related service>
         RC 59 = Cannot start <virt-related service>
+        RC 60 = Cannot enable <virt-related service>
         RC 100 = Tests completed and host does not qualify to run EMSVM
    """
 
@@ -645,6 +646,7 @@ class EMSVM(object):
 
     def __libvirt_startup_check(self):
         dependentServices = ["virtqemud.socket", "virtstoraged.socket", "virtnetworkd.socket", "virtnodedevd.socket"]
+        enableServices = ["virtnetworkd.service"]
         self.log_this.debug(
             "Going to check dependant libvirt services status"
         )
@@ -687,6 +689,44 @@ class EMSVM(object):
                     )
                     sys.exit(59)
 
+        for service in enableServices:
+            return_code = self.__libvirt_enable_check(service)
+            if return_code != 0:
+                self.log_this.warning(
+                    service + " is not enabled, going to try to enable it"
+                )
+                try:
+                    rc_restart = subprocess.call(['systemctl','enable',service],stdout=self.DEVNULL, stderr=self.DEVNULL)
+                except BaseException:
+                    self.log_this.error(
+                        "Cannot enable " + service
+                    )
+                    self.log_this.debug(
+                        "Going to exit with RC=60"
+                    )
+                    sys.exit(60)
+                self.log_this.debug(
+                    service + " has been enabled"
+                )
+                return_code = self.__libvirt_enable_check(service)
+                if return_code == 0:
+                    self.log_this.info(
+                        service + " has been succesfully enabled"
+                    )
+                else:
+                    if rc_restart == 0:
+                        self.log_this.error(
+                            "Although we enabled " + service + ", it was not enabled successfully."
+                        )
+                    else:
+                        self.log_this.error(
+                            "It was not possible to enable " + service
+                        )
+                    self.log_this.debug(
+                        "Going to exit with RC=60"
+                    )
+                    sys.exit(60)
+
 
     def __libvirt_check(self, servicetoCheck):
         try:
@@ -712,6 +752,30 @@ class EMSVM(object):
             )
         return return_code
 
+    
+    def __libvirt_enable_check(self, servicetoCheck):
+        try:
+            return_code = subprocess.call(['systemctl','is-enabled',servicetoCheck],stdout=self.DEVNULL, stderr=self.DEVNULL)
+            self.log_this.debug(
+                "We could run 'systemctl is-enabled " + servicetoCheck + "'"
+            )
+        except BaseException:
+            self.log_this.error(
+                "Could not run 'systemctl is-enabled " + servicetoCheck + "'"
+            )
+            self.log_this.debug(
+                "Going to exit with RC=58"
+            )
+            sys.exit(58)
+        if return_code != 0:
+            self.log_this.debug(
+                servicetoCheck + " is not enable."
+            )
+        else:
+            self.log_this.debug(
+                servicetoCheck + " is enable, we continue"
+            )
+        return return_code
 
 
     def __tuned_adm_check(self):
