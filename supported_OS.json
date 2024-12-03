@@ -8,8 +8,9 @@
     "Red Hat Enterprise Linux 8.5": "NOK",
     "Red Hat Enterprise Linux 8.6": "OK",
     "Red Hat Enterprise Linux 8.7": "OK",
-    "Red Hat Enterprise Linux 8.8": "NOK",
+    "Red Hat Enterprise Linux 8.8": "OK",
     "Red Hat Enterprise Linux 8.9": "NOK",
+    "Red Hat Enterprise Linux 8.10": "OK",
     "Red Hat Enterprise Linux 9.0": "OK",
     "Red Hat Enterprise Linux 9.1": "OK",
     "Red Hat Enterprise Linux 9.2": "OK"
