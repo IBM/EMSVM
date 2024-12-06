@@ -20,7 +20,7 @@ import mimetypes
 
 PROGRAM_NAME = "emsvm"
 # Remember to update the VERSION file too
-VERSION = "1.9"
+VERSION = "1.9.2"
 
 # Colorful constants
 RED = '\033[91m'
@@ -194,7 +194,7 @@ class EMSVM(object):
         self.HW_REQUIREMENTS_MD5 = "e84a1f9e468222b7c65bd690377c531f"
         self.NIC_ADAPTERS_MD5 = "20b701ad44edee6d0500489ec4156025"
         self.PACKAGES_MD5 = "18f419023e451155c505530dfc2b6131"
-        self.SUPPORTED_OS_MD5 = "11f932a5e8617e5ac159e01a961e7a8d"
+        self.SUPPORTED_OS_MD5 = "52f24b53acd1bccd372d9f9c8980911b"
 
         # Load files
         self.__load_json_files()
@@ -212,9 +212,11 @@ class EMSVM(object):
         self.VM_DISK_MD5 = [
             "5a6bfa25b8351b6863762226ffaca37d", # EMSVM-23E-9.1.qcow2.xz
             "c28bd8ed995a35190bb30a644b7b5b98", # EMSVM-23E-9.2.qcow2.xz
+            "1c93e8d56c41ca8e2d6890c0fdc724ce", # EMSVM-23E-9.4.qcow2.xz
             "473a4bad6a933733868e8d41eda7b2c4", # EMSVM-8.6.qcow2.xz
             "78a1543740b791dbb7eb9e70ce16406b", #
-            "6c89173fcfbc9459c719ad9349c7c3c6"  # EMSVM-8.8.qcow2.xz
+            "6c89173fcfbc9459c719ad9349c7c3c6", # EMSVM-8.8.qcow2.xz
+            "a4931e602dbe0eb84365d5175a28a8ab"  # EMSVM-8.10.qcow2.xz
         ]
 
         if self.development or self.RH8:
@@ -752,7 +754,7 @@ class EMSVM(object):
             )
         return return_code
 
-    
+
     def __libvirt_enable_check(self, servicetoCheck):
         try:
             return_code = subprocess.call(['systemctl','is-enabled',servicetoCheck],stdout=self.DEVNULL, stderr=self.DEVNULL)
