@@ -2109,7 +2109,10 @@ class EMSVM(object):
 
         if self.RH9:
             xml_vm_begin += """
-            <cpu mode='host-passthrough' check='none' migratable='on'/>"""
+            <cpu mode='host-passthrough' check='none' migratable='on'>
+                <feature policy='require' name='invtsc'/>
+            </cpu>
+            """
 
         xml_vm_begin += """
             <on_poweroff>destroy</on_poweroff>
