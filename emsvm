@@ -215,7 +215,6 @@ class EMSVM(object):
             "c28bd8ed995a35190bb30a644b7b5b98", # EMSVM-23E-9.2.qcow2.xz
             "719a6b2fd4e73e8677daa09aa64488f6", # EMSVM-23E-9.4.qcow2.xz
             "a0fcc338ce5ba03d7080757946926841", # EMSVM-23E-9.4.qcow2.xz (6.2.2.1)
-            "67643ffd1c6dc95ee98026f6ef9b1dff", # EMSVM-23E-9.4.qcow2.xz (6.2.3.0)
             "473a4bad6a933733868e8d41eda7b2c4", # EMSVM-8.6.qcow2.xz
             "78a1543740b791dbb7eb9e70ce16406b", #
             "6c89173fcfbc9459c719ad9349c7c3c6", # EMSVM-8.8.qcow2.xz
