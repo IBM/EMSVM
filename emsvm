@@ -100,7 +100,7 @@ class EMSVM(object):
         RC 100 = Tests completed and host does not qualify to run EMSVM
    """
 
-    def __init__ (self, subcommand, verbose, development, log_dir="/var/log/emsvm"):
+    def __init__ (self, subcommand, verbose, development, silent, log_dir="/var/log/emsvm"):
         # Start the clock
         self.start_time_date_full = datetime.datetime.now()
         self.start_time_date = self.start_time_date_full.strftime('%Y_%m_%d_%H_%M_%S')
@@ -108,6 +108,7 @@ class EMSVM(object):
         self.log_dir = log_dir
         self.verbose = verbose
         self.development = development
+        self.silent = silent
         self.fatal_error = False
         self.long_hostname = os.uname()[1]
         self.hostname = self.long_hostname.split('.', 1)[0]
@@ -213,10 +214,13 @@ class EMSVM(object):
             "5a6bfa25b8351b6863762226ffaca37d", # EMSVM-23E-9.1.qcow2.xz
             "c28bd8ed995a35190bb30a644b7b5b98", # EMSVM-23E-9.2.qcow2.xz
             "719a6b2fd4e73e8677daa09aa64488f6", # EMSVM-23E-9.4.qcow2.xz
+            "a0fcc338ce5ba03d7080757946926841", # EMSVM-23E-9.4.qcow2.xz (6.2.2.1)
+            "67643ffd1c6dc95ee98026f6ef9b1dff", # EMSVM-23E-9.4.qcow2.xz (6.2.3.0)
             "473a4bad6a933733868e8d41eda7b2c4", # EMSVM-8.6.qcow2.xz
             "78a1543740b791dbb7eb9e70ce16406b", #
             "6c89173fcfbc9459c719ad9349c7c3c6", # EMSVM-8.8.qcow2.xz
-            "240d26f479a6553dbbd529cf78a1176d"  # EMSVM-8.10.qcow2.xz
+            "240d26f479a6553dbbd529cf78a1176d", # EMSVM-8.10.qcow2.xz
+            "6400ebe310174d1da0c30e08e499f9b1"  # EMSVM-8.10.qcow2.xz (6.2.2.1)
         ]
 
         if self.development or self.RH8:
@@ -4070,36 +4074,39 @@ class EMSVM(object):
                     "'"
                 )
             self.__check_interfaces_in_use()
-            try:
-                self.log_this.info("Do you want to continue with the start EMSVM? (y/n): ")
-                start_VM_user_confirm = input()
-            except KeyboardInterrupt:
-                self.log_this.info(
-                    "User cancelled start EMSVM"
-                )
-                self.log_this.debug(
-                    "Going to exit with RC=33"
-                )
-                sys.exit(33)
-            if start_VM_user_confirm.lower() == 'y':
-                self.log_this.debug(
-                    "User accepted to start EMSVM"
-                )
-                break
-            elif start_VM_user_confirm.lower() == 'n':
-                self.log_this.info(
-                    "User cancelled start EMSVM"
-                )
-                self.log_this.debug(
-                    "Going to exit with RC=33"
-                )
-                sys.exit(33)
+            if not self.silent:
+                try:
+                    self.log_this.info("Do you want to continue with the start EMSVM? (y/n): ")
+                    start_VM_user_confirm = input()
+                except KeyboardInterrupt:
+                    self.log_this.info(
+                        "User cancelled start EMSVM"
+                    )
+                    self.log_this.debug(
+                        "Going to exit with RC=33"
+                    )
+                    sys.exit(33)
+                if start_VM_user_confirm.lower() == 'y':
+                    self.log_this.debug(
+                        "User accepted to start EMSVM"
+                    )
+                    break
+                elif start_VM_user_confirm.lower() == 'n':
+                    self.log_this.info(
+                        "User cancelled start EMSVM"
+                    )
+                    self.log_this.debug(
+                        "Going to exit with RC=33"
+                    )
+                    sys.exit(33)
+                else:
+                    self.log_this.warning(
+                        "We do not understand your input '" +
+                        str(start_VM_user_confirm) +
+                        "', we ask again."
+                    )
             else:
-                self.log_this.warning(
-                    "We do not understand your input '" +
-                    str(start_VM_user_confirm) +
-                    "', we ask again."
-                )
+                break
 
         # We are out of the loop
 
@@ -4429,6 +4436,16 @@ def parse_arguments():
         default=False
     )
 
+    parser.add_argument(
+        '--silent',
+        '-s',
+        required=False,
+        action='store_true',
+        dest='silent',
+        help=argparse.SUPPRESS,
+        default=False
+    )
+
     subcommand = parser.add_mutually_exclusive_group(required=True)
 
     subcommand.add_argument(
@@ -4493,12 +4510,12 @@ def parse_arguments():
         # Should not hit this
         sys.exit(RED + "QUIT: " + NOCOLOR + "Unexpected error parsing arguments\n")
 
-    return subcommand, args.verbose, args.development
+    return subcommand, args.verbose, args.development, args.silent
 
 
 def main():
-    subcommand, verbose, development = parse_arguments()
-    this_host = EMSVM(subcommand, verbose, development)
+    subcommand, verbose, development, silent = parse_arguments()
+    this_host = EMSVM(subcommand, verbose, development, silent)
     if subcommand == "start_EMS":
         host_check_passed = this_host.checkHost(startVM=True)
         VM_check_passed = this_host.checkVM(startVM=True)
