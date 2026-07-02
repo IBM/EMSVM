@@ -20,7 +20,7 @@ import mimetypes
 
 PROGRAM_NAME = "emsvm"
 # Remember to update the VERSION file too
-VERSION = "2.2"
+VERSION = "2.3"
 
 # Colorful constants
 RED = '\033[91m'
@@ -73,7 +73,7 @@ class EMSVM(object):
         RC 34 = FIPS enabled on host
         RC 35 = Did not get four LSN PCI XML friendly addresses
         RC 36 = Could not detach NICs
-        RC 37 = There are less than 2 HSN ports or more than 6 HSN ports
+        RC 37 = Invalid number of HSN ports (expected 1-6 HSN ports)
         RC 38 = Local version is not latest version
         RC 39 = PCI to be passthrough has IP address
         RC 40 = Could not connect to virsh console
@@ -1205,6 +1205,18 @@ class EMSVM(object):
                             "Going to check if we accept this HSN NIC based on JSON"
                         )
                         if self.NIC_dictionary[NIC] == "OK":
+                            # Check if device actually exists in sysfs
+                            pci_device_path = "/sys/bus/pci/devices/" + PCI_entry
+                            if not os.path.exists(pci_device_path):
+                                self.log_this.warning(
+                                    "PCI device " +
+                                    PCI_entry +
+                                    " appears in lspci but does not exist in " +
+                                    pci_device_path +
+                                    ". Skipping."
+                                )
+                                continue
+                            
                             goodPCILink = self.__check_PCI_speed_width(PCI_entry)
                             if goodPCILink:
                                 self.log_this.info(
@@ -1234,9 +1246,9 @@ class EMSVM(object):
                                 "is explicitly not supported"
                             )
         # Do we have any OK card?
-        if (len(self.HSN_PCI_address) > 1):
+        if (len(self.HSN_PCI_address) >= 1):
             self.log_this.info(
-                "Found at least two HSN ports"
+                "Found HSN port(s): " + str(len(self.HSN_PCI_address))
             )
             self.log_this.debug(
                 "The HSN PCI address list is: '" +
@@ -1249,10 +1261,14 @@ class EMSVM(object):
             )
             self.fatal_error = True
         elif (len(self.HSN_PCI_address) == 1):
-            self.log_this.error(
-                "Only one HSN PCI port was detected"
+            self.log_this.debug(
+                "Single port HSN PCI adapter detected"
             )
-            self.fatal_error = True
+            self.log_this.debug(
+                "The HSN PCI address is: '" +
+                str(self.HSN_PCI_address) +
+                "'"
+            )
         else:
             self.log_this.error(
                 "Did not find any supported NIC for HSN"
@@ -1993,14 +2009,14 @@ class EMSVM(object):
             "Got PCI XML friendly list: " +
             str(self.XML_friendly)
         )
-        # We must have 2..6 HSN ports, plus the 4 LSN
-        if len(self.XML_friendly) >= 6 and len(self.XML_friendly) <= 10:
+        # We must have 1..6 HSN ports, plus the 4 LSN (total 5..10 devices)
+        if len(self.XML_friendly) >= 5 and len(self.XML_friendly) <= 10:
             self.log_this.debug(
-                "There are 2 to 6 HSN ports"
+                "There are 1 to 6 HSN ports (total devices: " + str(len(self.XML_friendly)) + ")"
             )
         else:
             self.log_this.error(
-                "There are less than two HSN ports or more than six HSN ports"
+                "Invalid number of HSN ports detected. Expected 1-6 HSN ports (5-10 total devices with LSN), got " + str(len(self.XML_friendly)) + " total devices"
             )
             self.log_this.debug(
                 "Going to exit with RC=37"
